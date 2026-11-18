@@ -669,7 +669,7 @@ def contexto():
     return {"csrf": session.get("csrf", ""), "negocio": session.get("negocio", ""), "plan": session.get("plan") or {},
             "estado": session.get("estado", ""), "dias": session.get("dias", 0), "vence": session.get("vence", ""),
             "segmento": session.get("segmento", ""), "procsis": PROCSIS_URL, "METODOS": METODOS,
-            "marco": _marco_procsis()}
+            "marco": _marco_procsis(), "info": _info_procsis()}
 
 
 @app.after_request
@@ -1183,48 +1183,60 @@ def error_pagina(e):
     return render_template("bloqueado.html", titulo="No se pudo completar", detalle=getattr(e, "description", "Página no encontrada."), procsis=PROCSIS_URL, volver=True), e.code
 
 
-# ───────────────────────── menú y pie de página (diseño EduTrack, administrados desde PROCSIS) ─────────────────────────
-# El contenido (menú superior, columnas del pie, textos legales) lo edita PROCSIS desde su zona administrativa
-# (Comunicaciones y Mercadeo, TI, Ventas y Legal, Soporte). Esta app lo consulta en GET {PROCSIS_URL}/api/v1/tiendatrack/marco
-# con la misma X-API-Key de siempre, lo guarda en memoria unos minutos y, si PROCSIS no responde, usa el contenido de respaldo.
+# [tt-ventanas] ───────────────────────── menú y pie de página (diseño EduTrack, administrados desde PROCSIS) ─────────────────────────
+# El contenido (menú superior, columnas del pie, «Quién es PROCSIS», planes y demo) lo edita PROCSIS desde su zona administrativa.
+# Esta app lo consulta por API (GET {PROCSIS_URL}/api/v1/tiendatrack/marco e /info, con la X-API-Key de siempre), lo guarda unos minutos
+# en memoria y, si PROCSIS no responde, usa un contenido de respaldo. Nunca debe tumbar una página.
 MARCO_TTL_S = 300          # cada cuánto se vuelve a pedir a PROCSIS
 MARCO_REINTENTO_S = 60     # si PROCSIS no respondió, cuánto esperar antes de reintentar
 _MARCO = {"ts": 0.0, "ttl": 0, "datos": None}
+_INFO = {"ts": 0.0, "ttl": 0, "datos": None}
+_ACCIONES = ("quienes", "planes")
+
+
+def _procsis_api(metodo, ruta, datos=None, params=None, espera=8):
+    # Llama a la API de TiendaTrack en PROCSIS. Devuelve (código_http, json). Código 0 = no hubo respuesta.
+    if not (PROCSIS_URL and API_KEY):
+        return 0, {"ok": False, "error": "La conexión con PROCSIS no está configurada."}
+    url = PROCSIS_URL + "/api/v1/tiendatrack" + ruta + (("?" + urllib.parse.urlencode(params)) if params else "")
+    cuerpo = json.dumps(datos).encode("utf-8") if datos is not None else None
+    req = urllib.request.Request(url, data=cuerpo, method=metodo,
+                                 headers={"X-API-Key": API_KEY, "User-Agent": "tiendatrack-app", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=espera) as r:
+            return r.status, json.loads(r.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode("utf-8") or "{}")
+        except Exception:
+            return e.code, {"ok": False, "error": "PROCSIS respondió con un error."}
+    except Exception:
+        return 0, {"ok": False, "error": "PROCSIS no respondió. Intenta de nuevo en un minuto."}
 
 
 def _marco_respaldo():
     return {
         "menu": [
             {"titulo": "Procsis", "etiqueta": "Explorar Procsis", "sub": [
-                {"titulo": "¿Qué es Procsis?", "url": "/procsis"},
+                {"titulo": "¿Qué es Procsis?", "accion": "quienes"},
                 {"titulo": "Infraestructura en la Nube", "url": "/procsis"},
                 {"titulo": "Sello de Auditoría Digital", "url": "/procsis"},
                 {"titulo": "Seguridad Jurídica y Ciberseguridad", "url": "/procsis"}]},
             {"titulo": "Soluciones", "url": "/procsis"},
-            {"titulo": "Planes", "url": "/tt"},
-            {"titulo": "Ayuda", "url": "/contacto"},
-            {"titulo": "Sedes y Puntos de Atención", "url": "/contacto"},
-            {"titulo": "Support", "url": "/contacto"},
+            {"titulo": "Planes", "accion": "planes"},
+            {"titulo": "Ayuda", "etiqueta": "Ayuda y soporte", "sub": [{"titulo": "Radicar una PQR", "url": "/pqr"}, {"titulo": "Soporte", "url": "/contacto"}]},
+            {"titulo": "Sedes y Puntos de Atención", "url": "/puntos-atencion"},
+            {"titulo": "Support", "url": "/support"},
         ],
         "marca": {"titulo": "PROCSIS", "texto": "Soluciones digitales para tu negocio. Un producto de PROCSIS.",
                   "enlaces": [{"titulo": "Soporte por correo", "url": "/contacto"}, {"titulo": "Línea de atención", "url": "/contacto"},
                               {"titulo": "Formulario de contacto", "url": "/contacto"}]},
         "columnas": [
-            {"titulo": "Procsis y la Educación", "enlaces": [
-                {"titulo": "Procsis y el sector educativo", "url": "/procsis"}, {"titulo": "EduTrack para directivos y rectores", "url": "/procsis"},
-                {"titulo": "Gestión para la coordinación escolar", "url": "/procsis"}, {"titulo": "Plataforma para docentes", "url": "/procsis"},
-                {"titulo": "Portal de seguimiento para padres", "url": "/procsis"}, {"titulo": "Socios y alianzas", "url": "/procsis"}]},
-            {"titulo": "Infraestructura y Operación", "enlaces": [
-                {"titulo": "Operador de infraestructura", "url": "/procsis"}, {"titulo": "Trust Center", "url": "/procsis"},
-                {"titulo": "Política de privacidad", "url": "/tratamiento-datos"}, {"titulo": "Integridad y conformidad", "url": "/procsis"},
-                {"titulo": "Sustentabilidad", "url": "/procsis"}]},
-            {"titulo": "Corporativo e Institucional", "enlaces": [
-                {"titulo": "Equipo Directivo", "url": "/procsis"}, {"titulo": "Prensa y Medios", "url": "/procsis"},
-                {"titulo": "Eventos y capacitaciones docentes", "url": "/procsis"}, {"titulo": "Canal oficial de PQRSD", "url": "/contacto"}]},
-            {"titulo": "Procsis Ventas y Legal", "enlaces": [
-                {"titulo": "Condiciones de venta", "url": "/legal"}, {"titulo": "Política de entrega", "url": "/legal"},
-                {"titulo": "Política de devoluciones", "url": "/legal"}, {"titulo": "Preguntas frecuentes", "url": "/contacto"},
-                {"titulo": "Superintendencia de Industria y Comercio", "url": "https://www.sic.gov.co"}]},
+            {"titulo": "Procsis y la Educación", "enlaces": [{"titulo": "Procsis y el sector educativo", "url": "/procsis"}, {"titulo": "Socios y alianzas", "url": "/procsis"}]},
+            {"titulo": "Infraestructura y Operación", "enlaces": [{"titulo": "Trust Center", "url": "/procsis"}, {"titulo": "Política de privacidad", "url": "/tratamiento-datos"}]},
+            {"titulo": "Corporativo e Institucional", "enlaces": [{"titulo": "Equipo Directivo", "url": "/procsis"}, {"titulo": "Canal oficial de PQRSD", "url": "/pqr"}]},
+            {"titulo": "Procsis Ventas y Legal", "enlaces": [{"titulo": "Condiciones de venta", "url": "/legal"}, {"titulo": "Política de devoluciones", "url": "/legal"},
+                                                          {"titulo": "Superintendencia de Industria y Comercio", "url": "https://www.sic.gov.co"}]},
         ],
         "legal": [{"titulo": "Términos", "url": "/legal"}, {"titulo": "Cookies", "url": "/legal"},
                   {"titulo": "Habeas data", "url": "/tratamiento-datos"}, {"titulo": "Sedes y Puntos de Atención", "url": "/contacto"}],
@@ -1237,6 +1249,8 @@ def _marco_respaldo():
 
 def _marco_url(u):
     u = str(u or "").strip()
+    if u.rstrip("/") == "/pqr":
+        return "/pqr"                      # las PQR se radican desde esta misma app (y llegan a PROCSIS)
     if u.startswith("/") and not u.startswith("//"):
         return (PROCSIS_URL + u) if PROCSIS_URL else "#"
     if re.match(r"^(https?://|mailto:|tel:)", u, re.I):
@@ -1248,19 +1262,24 @@ def _marco_enlaces(lista, tope=12):
     sal = []
     for e in (lista if isinstance(lista, list) else [])[:tope]:
         if isinstance(e, dict) and str(e.get("titulo") or "").strip():
-            sal.append({"titulo": str(e["titulo"]).strip()[:90], "url": _marco_url(e.get("url"))})
+            ac = e.get("accion") if e.get("accion") in _ACCIONES else ""
+            sal.append({"titulo": str(e["titulo"]).strip()[:90], "url": _marco_url(e.get("url")), "accion": ac})
     return sal
 
 
 def _marco_normalizar(b):
-    """Deja el contenido en la forma que usan las plantillas, descartando lo que venga mal formado."""
+    # Deja el contenido en la forma que usan las plantillas, descartando lo que venga mal formado.
     b = b if isinstance(b, dict) else {}
     t = lambda v, n: str(v or "").strip()[:n]
     menu = []
     for it in (b.get("menu") if isinstance(b.get("menu"), list) else [])[:8]:
         if isinstance(it, dict) and t(it.get("titulo"), 40):
-            sub = _marco_enlaces(it.get("sub"), 10)
-            menu.append({"titulo": t(it.get("titulo"), 40), "etiqueta": t(it.get("etiqueta"), 40), "sub": sub, "url": _marco_url(it.get("url"))})
+            grupos = []
+            for gr in (it.get("grupos") if isinstance(it.get("grupos"), list) else [])[:4]:
+                if isinstance(gr, dict) and _marco_enlaces(gr.get("sub"), 10):
+                    grupos.append({"etiqueta": t(gr.get("etiqueta"), 40), "sub": _marco_enlaces(gr.get("sub"), 10)})
+            menu.append({"titulo": t(it.get("titulo"), 40), "etiqueta": t(it.get("etiqueta"), 40), "sub": _marco_enlaces(it.get("sub"), 10),
+                         "grupos": grupos, "url": _marco_url(it.get("url")), "accion": it.get("accion") if it.get("accion") in _ACCIONES else ""})
     marca = b.get("marca") if isinstance(b.get("marca"), dict) else {}
     cols = []
     for c in (b.get("columnas") if isinstance(b.get("columnas"), list) else [])[:4]:
@@ -1288,30 +1307,103 @@ def _marco_limpiar(bruto):
     return res
 
 
-def _marco_procsis():
-    """Menú y pie vigentes: lo último que dijo PROCSIS, o el respaldo si no responde. Nunca debe tumbar una página."""
-    c, ahora_t = _MARCO, time.time()
+def _cache_procsis(c, ruta, limpiar, espera):
+    ahora_t = time.time()
     if c["datos"] is not None and ahora_t - c["ts"] < c["ttl"]:
         return c["datos"]
-    bruto = None
-    if PROCSIS_URL and API_KEY:
-        req = urllib.request.Request(PROCSIS_URL + "/api/v1/tiendatrack/marco", headers={"X-API-Key": API_KEY, "User-Agent": "tiendatrack-app"})
-        try:
-            with urllib.request.urlopen(req, timeout=3) as r:
-                bruto = json.loads(r.read().decode("utf-8"))
-        except Exception:
-            bruto = None
+    cod, bruto = _procsis_api("GET", ruta, espera=espera) if (PROCSIS_URL and API_KEY) else (0, None)
     try:
-        if isinstance(bruto, dict):
-            c["datos"], c["ttl"] = _marco_limpiar(bruto), MARCO_TTL_S
+        if cod == 200 and isinstance(bruto, dict) and bruto.get("ok", True):
+            c["datos"], c["ttl"] = limpiar(bruto), MARCO_TTL_S
         else:
             if c["datos"] is None:
-                c["datos"] = _marco_limpiar({})
+                c["datos"] = limpiar({})
             c["ttl"] = MARCO_REINTENTO_S
     except Exception:
-        c["datos"], c["ttl"] = _marco_limpiar({}), MARCO_REINTENTO_S
+        c["datos"], c["ttl"] = limpiar({}), MARCO_REINTENTO_S
     c["ts"] = ahora_t
     return c["datos"]
+
+
+def _marco_procsis():
+    return _cache_procsis(_MARCO, "/marco", _marco_limpiar, 3)
+
+
+def _info_limpiar(bruto):
+    b = bruto if isinstance(bruto, dict) else {}
+    t = lambda v, n: str(v or "").strip()[:n]
+    q = b.get("quienes") if isinstance(b.get("quienes"), dict) else {}
+    quienes = {"marca": t(q.get("marca"), 40) or "PROCSIS", "sub": t(q.get("sub"), 120), "titulo": t(q.get("titulo"), 120) or "Quiénes somos",
+               "texto": t(q.get("texto"), 3000) or "PROCSIS desarrolla soluciones digitales. TiendaTrack es uno de sus productos.",
+               "puntos": [t(p, 200) for p in (q.get("puntos") if isinstance(q.get("puntos"), list) else [])[:8] if t(p, 200)],
+               "correo": t(q.get("correo"), 120), "telefono": t(q.get("telefono"), 40), "web": _marco_url(q.get("web") or "/procsis")}
+    planes = []
+    for p in (b.get("planes") if isinstance(b.get("planes"), list) else [])[:8]:
+        if isinstance(p, dict) and t(p.get("nombre"), 80):
+            num = lambda k: max(0, int(p.get(k) or 0)) if str(p.get(k) or "0").lstrip("-").isdigit() else 0
+            planes.append({"nombre": t(p.get("nombre"), 80), "descripcion": t(p.get("descripcion"), 300), "mensual": num("precio_mensual"), "anual": num("precio_anual"),
+                           "sucursales": num("max_sucursales"), "usuarios": num("max_usuarios"), "productos": num("max_productos"), "dian": t(p.get("incluye_dian"), 40) or "No"})
+    d = b.get("demo") if isinstance(b.get("demo"), dict) else {}
+    dias = int(d.get("dias") or 15) if str(d.get("dias") or "15").isdigit() else 15
+    demo = {"dias": dias, "abierto": bool(d.get("registro_abierto")), "url": _marco_url(d.get("url") or "/tt")}
+    return {"quienes": quienes, "planes": planes, "demo": demo}
+
+
+def _info_procsis():
+    return _cache_procsis(_INFO, "/info", _info_limpiar, 3)
+
+
+def _cop(v):
+    return "$" + "{:,}".format(int(v or 0)).replace(",", ".")
+
+
+# ───────────────────────── PQR: se radican en PROCSIS (área de Soluciones) ─────────────────────────
+def _pqr_catalogo():
+    cod, r = _procsis_api("GET", "/pqr/catalogo")
+    if cod == 200 and r.get("ok"):
+        return r.get("tipos") or [], r.get("categorias") or [], int(r.get("dias_habiles_respuesta") or 15)
+    return [], [], 15
+
+
+@app.route("/pqr", methods=["GET", "POST"])
+def pqr():
+    email = session.get("email", "")
+    tipos, cats, dias = _pqr_catalogo()
+    error, f = None, {"tipo": "", "categoria": "", "asunto": "", "descripcion": ""}
+    if request.method == "POST":
+        f = {k: (request.form.get(k) or "").strip() for k in ("tipo", "categoria", "asunto", "descripcion")}
+        cod, r = _procsis_api("POST", "/pqr", {"email": email, "tipo": f["tipo"], "categoria": f["categoria"], "asunto": f["asunto"][:120],
+                                               "descripcion": f["descripcion"][:4000], "negocio": session.get("negocio", ""),
+                                               "referencia_externa": (request.form.get("ref") or "")[:60]})
+        if cod in (200, 201) and r.get("ok"):
+            return redirect(url_for("pqr_detalle", radicado=r.get("radicado"), nuevo=1))
+        error = r.get("error") or "No pudimos radicar tu solicitud. Intenta de nuevo."
+    cod, lst = _procsis_api("GET", "/pqr", params={"email": email})
+    casos = lst.get("pqr", []) if (cod == 200 and lst.get("ok")) else []
+    return render_template("pqr.html", tipos=tipos, cats=cats, dias=dias, error=error, f=f, casos=casos, ref=secrets.token_hex(8), sin_servicio=(not tipos))
+
+
+@app.route("/pqr/<radicado>", methods=["GET", "POST"])
+def pqr_detalle(radicado):
+    email = session.get("email", "")
+    rad = re.sub(r"\D", "", radicado or "")[:30]
+    error = aviso = None
+    if request.method == "POST":
+        cod, r = _procsis_api("POST", "/pqr/%s/mensaje" % rad, {"email": email, "mensaje": (request.form.get("mensaje") or "").strip()})
+        if cod == 200 and r.get("ok"):
+            aviso = "Enviamos tu mensaje al equipo de Soluciones."
+        else:
+            error = r.get("error") or "No pudimos enviar tu mensaje."
+    cod, r = _procsis_api("GET", "/pqr/%s" % rad, params={"email": email})
+    if cod != 200 or not r.get("ok"):
+        abort(404, "No encontramos esa PQR en tu cuenta.")
+    if request.args.get("nuevo") and not aviso:
+        aviso = "Radicamos tu solicitud. Guarda tu número de radicado."
+    return render_template("pqr_detalle.html", p=r["pqr"], error=error, aviso=aviso)
+
+
+app.add_template_filter(_cop, "cop")
+app.add_template_filter(lambda v: "{:,}".format(int(v or 0)).replace(",", "."), "cop_n")
 
 
 # ───────────────────────── plantillas incluidas en este archivo ─────────────────────────
@@ -1438,6 +1530,7 @@ select.campo{appearance:none;-webkit-appearance:none;background-image:linear-gra
   </section>
 </main>
 {% include 'marco_pie.html' %}
+{% include 'marco_ventanas.html' %}
 {% block scripts %}{% endblock %}
 </body>
 </html>
@@ -1454,9 +1547,10 @@ select.campo{appearance:none;-webkit-appearance:none;background-image:linear-gra
 .mp-panel{display:none;position:absolute;left:0;right:0;top:100%;background:rgba(255,255,255,.97);border-bottom:1px solid rgba(10,42,143,.10);
   box-shadow:0 18px 40px rgba(10,42,143,.10);padding:22px clamp(16px,4vw,44px) 26px calc(clamp(16px,4vw,44px) + clamp(0px,14vw,190px))}
 .mp-panel ul{list-style:none;margin:0;padding:0}
+.mp-grupos{display:flex;flex-wrap:wrap;gap:12px clamp(28px,6vw,90px)}
 .mp-eti{margin:0 0 12px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#6e6e73;font-weight:500}
-.mp-panel a{display:block;padding:7px 0;font-size:16px;color:#1d1d1f;text-decoration:none}
-.mp-panel a:hover{color:#0a6fb5}
+.mp-panel a,.mp-panel button.mp-enl{display:block;padding:7px 0;font:inherit;font-size:16px;color:#1d1d1f;text-decoration:none;background:none;border:0;cursor:pointer;text-align:left}
+.mp-panel a:hover,.mp-panel button.mp-enl:hover{color:#0a6fb5}
 .mp-it.abierto>.mp-panel{display:block}
 @media (hover:hover) and (min-width:861px){.mp-sub:hover>.mp-panel{display:block}}
 .mp-burger{display:none;width:100%;text-align:left;padding:13px 0;font:inherit;font-size:15px;font-weight:600;color:#0a2a8f;background:none;border:0;cursor:pointer}
@@ -1468,22 +1562,29 @@ select.campo{appearance:none;-webkit-appearance:none;background-image:linear-gra
   .mp-panel{position:static;box-shadow:none;border:0;padding:4px 0 10px 14px;background:transparent}
 }
 </style>
+{% macro enlace(s) %}{% if s.accion %}<button type="button" class="mp-enl" data-abrir="{{ s.accion }}">{{ s.titulo }}</button>{% else %}<a href="{{ s.url }}"{% if s.url[:1] != '/' %} target="_blank" rel="noopener"{% endif %}>{{ s.titulo }}</a>{% endif %}{% endmacro %}
 {% if marco.menu %}
 <nav class="mp-menu" aria-label="Menú PROCSIS">
   <div class="mp-menu-in">
     <button class="mp-burger" type="button" aria-expanded="false" aria-controls="mp-lista">☰ Menú</button>
     <ul class="mp-lista" id="mp-lista">
     {% for it in marco.menu %}
-      {% if it.sub %}
+      {% if it.sub or it.grupos %}
       <li class="mp-it mp-sub">
         <button class="mp-top" type="button" aria-expanded="false" aria-haspopup="true">{{ it.titulo }}</button>
         <div class="mp-panel">
+          {% if it.grupos %}
+          <div class="mp-grupos">{% for gr in it.grupos %}<div>{% if gr.etiqueta %}<p class="mp-eti">{{ gr.etiqueta }}</p>{% endif %}<ul>{% for s in gr.sub %}<li>{{ enlace(s) }}</li>{% endfor %}</ul></div>{% endfor %}</div>
+          {% else %}
           {% if it.etiqueta %}<p class="mp-eti">{{ it.etiqueta }}</p>{% endif %}
-          <ul>{% for s in it.sub %}<li><a href="{{ s.url }}" target="_blank" rel="noopener">{{ s.titulo }}</a></li>{% endfor %}</ul>
+          <ul>{% for s in it.sub %}<li>{{ enlace(s) }}</li>{% endfor %}</ul>
+          {% endif %}
         </div>
       </li>
+      {% elif it.accion %}
+      <li class="mp-it"><button class="mp-top" type="button" data-abrir="{{ it.accion }}">{{ it.titulo }}</button></li>
       {% else %}
-      <li class="mp-it"><a class="mp-top" href="{{ it.url }}" target="_blank" rel="noopener">{{ it.titulo }}</a></li>
+      <li class="mp-it"><a class="mp-top" href="{{ it.url }}"{% if it.url[:1] != '/' %} target="_blank" rel="noopener"{% endif %}>{{ it.titulo }}</a></li>
       {% endif %}
     {% endfor %}
     </ul>
@@ -1494,15 +1595,17 @@ select.campo{appearance:none;-webkit-appearance:none;background-image:linear-gra
   var nav=document.querySelector('.mp-menu');if(!nav)return;
   var bur=nav.querySelector('.mp-burger');
   bur.addEventListener('click',function(){var o=nav.classList.toggle('abierto');bur.setAttribute('aria-expanded',o);});
+  function cerrar(){nav.querySelectorAll('.mp-it.abierto').forEach(function(x){x.classList.remove('abierto');x.firstElementChild.setAttribute('aria-expanded','false');});}
   nav.querySelectorAll('.mp-sub>.mp-top').forEach(function(b){
     b.addEventListener('click',function(e){
       e.stopPropagation();var li=b.parentNode,o=!li.classList.contains('abierto');
-      nav.querySelectorAll('.mp-it.abierto').forEach(function(x){x.classList.remove('abierto');x.firstElementChild.setAttribute('aria-expanded','false');});
+      cerrar();
       if(o){li.classList.add('abierto');b.setAttribute('aria-expanded','true');}
     });
   });
-  document.addEventListener('click',function(){nav.querySelectorAll('.mp-it.abierto').forEach(function(x){x.classList.remove('abierto');x.firstElementChild.setAttribute('aria-expanded','false');});});
-  document.addEventListener('keydown',function(e){if(e.key==='Escape'){nav.querySelectorAll('.mp-it.abierto').forEach(function(x){x.classList.remove('abierto');});}});
+  nav.addEventListener('click',function(e){if(e.target.closest('[data-abrir]'))cerrar();});
+  document.addEventListener('click',cerrar);
+  document.addEventListener('keydown',function(e){if(e.key==='Escape')cerrar();});
 })();
 </script>
 {% endif %}
@@ -1542,19 +1645,19 @@ select.campo{appearance:none;-webkit-appearance:none;background-image:linear-gra
       <div class="mp-col mp-marca">
         <h3>{{ marco.marca.titulo }}</h3>
         {% if marco.marca.texto %}<p>{{ marco.marca.texto }}</p>{% endif %}
-        <ul>{% for e in marco.marca.enlaces %}<li><a href="{{ e.url }}" target="_blank" rel="noopener">{{ e.titulo }}</a></li>{% endfor %}</ul>
+        <ul>{% for e in marco.marca.enlaces %}<li><a href="{{ e.url }}"{% if e.url[:1] != '/' %} target="_blank" rel="noopener"{% endif %}>{{ e.titulo }}</a></li>{% endfor %}</ul>
       </div>
       {% endif %}
       {% for c in marco.columnas %}
       <div class="mp-col">
         <h3>{{ c.titulo }}</h3>
-        <ul>{% for e in c.enlaces %}<li><a href="{{ e.url }}" target="_blank" rel="noopener">{{ e.titulo }}</a></li>{% endfor %}</ul>
+        <ul>{% for e in c.enlaces %}<li><a href="{{ e.url }}"{% if e.url[:1] != '/' %} target="_blank" rel="noopener"{% endif %}>{{ e.titulo }}</a></li>{% endfor %}</ul>
       </div>
       {% endfor %}
     </div>
     <div class="mp-legal">
       <span>{{ marco.copyright }}</span>
-      <ul>{% for e in marco.legal %}<li><a href="{{ e.url }}" target="_blank" rel="noopener">{{ e.titulo }}</a></li>{% endfor %}</ul>
+      <ul>{% for e in marco.legal %}<li><a href="{{ e.url }}"{% if e.url[:1] != '/' %} target="_blank" rel="noopener"{% endif %}>{{ e.titulo }}</a></li>{% endfor %}</ul>
     </div>
   </div></div>
   <div class="mp-negro">
@@ -1564,9 +1667,135 @@ select.campo{appearance:none;-webkit-appearance:none;background-image:linear-gra
   </div>
 </footer>
 ''',
+    'marco_ventanas.html': r'''<style>
+.ven{border:0;padding:0;border-radius:24px;width:min(94vw,820px);max-height:88vh;background:#fff;color:#0b1437;box-shadow:0 30px 90px rgba(10,42,143,.35);font-family:inherit}
+.ven::backdrop{background:rgba(8,18,60,.55);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+.ven-in{padding:clamp(22px,4vw,36px);overflow:auto;max-height:88vh}
+.ven h2{margin:0 0 6px;font-size:clamp(22px,3.4vw,30px);letter-spacing:-.02em;color:#0a2a8f}
+.ven .ven-sub{margin:0 0 16px;color:#4b5b86;font-size:15px}
+.ven-x{position:absolute;right:14px;top:12px;border:0;background:rgba(10,42,143,.08);color:#0a2a8f;width:36px;height:36px;border-radius:50%;font-size:20px;cursor:pointer;line-height:1}
+.ven p.txt{white-space:pre-line;line-height:1.65;font-size:15.5px;margin:0 0 14px}
+.ven ul.pts{margin:0 0 16px;padding-left:20px;line-height:1.7;font-size:15px}
+.ven .cta{display:inline-block;padding:12px 20px;border-radius:999px;background:linear-gradient(135deg,#0a2a8f,#1747d6 55%,#12b5ff);color:#fff;font-weight:700;text-decoration:none;font-size:15px;margin:4px 8px 4px 0}
+.ven .cta.sec{background:#eef3ff;color:#0a2a8f}
+.ven .cta.off{background:#e5e8f2;color:#6b7aa3}
+.ven-planes{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:6px 0 14px}
+.ven-plan{border:1px solid rgba(10,42,143,.14);border-radius:18px;padding:18px;background:linear-gradient(180deg,#fff,#f4f8ff)}
+.ven-plan h3{margin:0 0 4px;font-size:18px}
+.ven-plan p{margin:0 0 8px;font-size:13.5px;color:#4b5b86}
+.ven-plan .pr{font-size:26px;font-weight:800;color:#0a2a8f;letter-spacing:-.02em}.ven-plan .pr small{font-size:13px;font-weight:600;color:#4b5b86}
+.ven-plan ul{margin:10px 0 0;padding-left:18px;font-size:13.5px;line-height:1.6}
+.ven small.nota{display:block;color:#6b7aa3;font-size:12.5px;margin-top:8px}
+</style>
+<dialog class="ven" id="ven-quienes" aria-labelledby="vq-t">
+  <div class="ven-in">
+    <button class="ven-x" type="button" data-cerrar aria-label="Cerrar">×</button>
+    <h2 id="vq-t">{{ info.quienes.marca }}{% if info.quienes.sub %} · {{ info.quienes.sub }}{% endif %}</h2>
+    <p class="ven-sub">{{ info.quienes.titulo }}</p>
+    <p class="txt">{{ info.quienes.texto }}</p>
+    {% if info.quienes.puntos %}<ul class="pts">{% for p in info.quienes.puntos %}<li>{{ p }}</li>{% endfor %}</ul>{% endif %}
+    {% if info.quienes.web != '#' %}<a class="cta" href="{{ info.quienes.web }}" target="_blank" rel="noopener">Conocer más de PROCSIS</a>{% endif %}
+    {% if info.quienes.correo %}<a class="cta sec" href="mailto:{{ info.quienes.correo }}">{{ info.quienes.correo }}</a>{% endif %}
+    {% if info.quienes.telefono %}<a class="cta sec" href="tel:{{ info.quienes.telefono }}">{{ info.quienes.telefono }}</a>{% endif %}
+  </div>
+</dialog>
+<dialog class="ven" id="ven-planes" aria-labelledby="vp-t">
+  <div class="ven-in">
+    <button class="ven-x" type="button" data-cerrar aria-label="Cerrar">×</button>
+    <h2 id="vp-t">Planes y demo gratis</h2>
+    <p class="ven-sub">Empieza con una demo de {{ info.demo.dias }} días y paga solo si te sirve.</p>
+    {% if info.planes %}
+    <div class="ven-planes">
+      {% for p in info.planes %}
+      <div class="ven-plan">
+        <h3>{{ p.nombre }}</h3>{% if p.descripcion %}<p>{{ p.descripcion }}</p>{% endif %}
+        <div class="pr">{{ p.mensual | cop }} <small>/ mes</small></div>
+        {% if p.anual %}<p>o {{ p.anual | cop }} al año</p>{% endif %}
+        <ul><li>Hasta {{ p.sucursales }} sucursal(es) y {{ p.usuarios }} usuario(s)</li><li>Hasta {{ p.productos | cop_n }} productos</li><li>Facturación DIAN: {{ p.dian }}</li></ul>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}<p class="txt">Los planes se muestran aquí en cuanto PROCSIS los publique.</p>{% endif %}
+    {% if info.demo.url != '#' %}{% if info.demo.abierto %}<a class="cta" href="{{ info.demo.url }}" target="_blank" rel="noopener">Probar {{ info.demo.dias }} días gratis</a>{% else %}<span class="cta off">Demo próximamente</span><a class="cta sec" href="{{ info.demo.url }}" target="_blank" rel="noopener">Ver en PROCSIS</a>{% endif %}{% endif %}
+    <small class="nota">Precios en pesos colombianos. Pagos seguros con Wompi.</small>
+  </div>
+</dialog>
+<script>
+(function(){
+  document.addEventListener('click',function(e){
+    var a=e.target.closest('[data-abrir]');
+    if(a){var d=document.getElementById('ven-'+a.getAttribute('data-abrir'));if(d&&d.showModal){e.preventDefault();d.showModal();return;}}
+    var c=e.target.closest('[data-cerrar]');if(c){c.closest('dialog').close();return;}
+    if(e.target.tagName==='DIALOG'){e.target.close();}
+  });
+})();
+</script>
+''',
+    'pqr.html': r'''{% extends "publico_base.html" %}
+{% block titulo %}PQRSD{% endblock %}
+{% block nav %}<a class="vidrio" href="/">Volver a mi negocio</a>{% endblock %}
+{% block hero %}{% endblock %}
+{% block tarjeta %}
+<style>main{grid-template-columns:minmax(0,1fr)!important}.tarjeta{max-width:900px!important}textarea.campo{min-height:140px;resize:vertical}
+.pq-caso{display:flex;flex-wrap:wrap;gap:6px 16px;justify-content:space-between;align-items:center;padding:13px 16px;margin:0 0 10px;border:1px solid rgba(10,42,143,.14);border-radius:16px;background:rgba(255,255,255,.7);text-decoration:none;color:inherit}
+.pq-caso b{color:#0a2a8f}.pq-caso small{color:#4b5b86}
+.pq-est{padding:4px 12px;border-radius:999px;font-size:12.5px;font-weight:700;background:#e0f2ff;color:#0b4a8f}.pq-est.cerrado{background:#dcfae6;color:#067647}
+h3.pq-h{margin:26px 0 12px;font-size:18px;color:#0a2a8f}</style>
+<h2>Peticiones, quejas, reclamos y sugerencias</h2>
+<p class="sub">Tu solicitud se radica en PROCSIS y llega al área de Soluciones. Te respondemos en {{ dias }} días hábiles.</p>
+{% if error %}<div class="aviso err" role="alert">{{ error }}</div>{% endif %}
+{% if sin_servicio %}<div class="aviso info">El servicio de PQR no responde en este momento. Intenta de nuevo en un minuto.</div>{% endif %}
+<form method="post" action="{{ url_for('pqr') }}">
+  <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="ref" value="{{ ref }}">
+  <div class="fila2">
+    <div><label for="tipo">Tipo</label>
+      <select class="campo" id="tipo" name="tipo" required><option value="">Elige…</option>{% for t in tipos %}<option value="{{ t.clave }}" {{ 'selected' if f.tipo == t.clave }}>{{ t.nombre }}</option>{% endfor %}</select></div>
+    <div><label for="categoria">Tema</label>
+      <select class="campo" id="categoria" name="categoria" required><option value="">Elige…</option>{% for c in cats %}<option value="{{ c.clave }}" {{ 'selected' if f.categoria == c.clave }}>{{ c.nombre }}</option>{% endfor %}</select></div>
+  </div>
+  <label for="asunto">Asunto</label>
+  <input class="campo" id="asunto" name="asunto" type="text" maxlength="120" value="{{ f.asunto }}" required>
+  <label for="descripcion">Cuéntanos qué pasó</label>
+  <textarea class="campo" id="descripcion" name="descripcion" maxlength="4000" required>{{ f.descripcion }}</textarea>
+  <p class="ayuda">Mínimo 10 caracteres. No incluyas claves ni datos de tarjetas.</p>
+  <button class="btn" type="submit" {{ 'disabled' if sin_servicio }}>Radicar PQR</button>
+</form>
+<h3 class="pq-h">Tus casos</h3>
+{% for c in casos %}
+<a class="pq-caso" href="{{ url_for('pqr_detalle', radicado=c.radicado) }}">
+  <span><b>{{ c.radicado_formato }}</b><br><small>{{ c.tipo }} · {{ c.asunto }}</small></span>
+  <span><span class="pq-est {{ '' if c.abierto else 'cerrado' }}">{{ c.estado }}</span>{% if c.fecha_limite %}<br><small>Límite: {{ c.fecha_limite }}</small>{% endif %}</span>
+</a>
+{% else %}<p class="ayuda">Aún no has radicado casos.</p>{% endfor %}
+{% endblock %}
+''',
+    'pqr_detalle.html': r'''{% extends "publico_base.html" %}
+{% block titulo %}PQR {{ p.radicado_formato }}{% endblock %}
+{% block nav %}<a class="vidrio" href="{{ url_for('pqr') }}">Mis PQR</a>{% endblock %}
+{% block hero %}{% endblock %}
+{% block tarjeta %}
+<style>main{grid-template-columns:minmax(0,1fr)!important}.tarjeta{max-width:900px!important}textarea.campo{min-height:100px;resize:vertical}
+.pq-bloque{margin:0 0 16px;padding:14px 16px;border:1px solid rgba(10,42,143,.14);border-radius:16px;background:rgba(255,255,255,.7);white-space:pre-line;line-height:1.6}
+.pq-bloque b{display:block;color:#0a2a8f;margin-bottom:4px}</style>
+<h2>PQR {{ p.radicado_formato }}</h2>
+<p class="sub">{{ p.tipo }} · {{ p.categoria_nombre }} · Estado: <b>{{ p.estado }}</b>{% if p.fecha_limite %} · Respuesta a más tardar el {{ p.fecha_limite }}{% endif %}</p>
+{% if aviso %}<div class="aviso ok" role="status">{{ aviso }}</div>{% endif %}
+{% if error %}<div class="aviso err" role="alert">{{ error }}</div>{% endif %}
+<div class="pq-bloque"><b>{{ p.asunto }}</b>{{ p.descripcion }}</div>
+{% if p.respuesta %}<div class="pq-bloque"><b>Respuesta de PROCSIS{% if p.fecha_respuesta %} · {{ p.fecha_respuesta }}{% endif %}</b>{{ p.respuesta }}</div>{% endif %}
+{% if p.abierto %}
+<form method="post" action="{{ url_for('pqr_detalle', radicado=p.radicado) }}">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label for="mensaje">Agregar un mensaje al caso</label>
+  <textarea class="campo" id="mensaje" name="mensaje" maxlength="1000" required></textarea>
+  <button class="btn" type="submit">Enviar mensaje</button>
+</form>
+{% else %}<p class="ayuda">Este caso está cerrado. Si necesitas algo más, radica una PQR nueva.</p>{% endif %}
+{% endblock %}
+''',
     'login.html': r'''{% extends "publico_base.html" %}
 {% block titulo %}Ingresar{% endblock %}
-{% block nav %}{% if planes_url %}<a class="vidrio" href="{{ planes_url }}">Planes y demo gratis</a>{% endif %}{% endblock %}
+{% block nav %}{% if planes_url %}<a class="vidrio" href="{{ planes_url }}" data-abrir="planes">Planes y demo gratis</a>{% endif %}{% endblock %}
 {% block tarjeta %}
 <h2>Ingresa a tu negocio</h2>
 <p class="sub">Ventas, inventario y caja en un solo lugar</p>
