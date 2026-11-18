@@ -19,6 +19,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from jinja2 import ChoiceLoader, DictLoader, FileSystemLoader
 from flask import (Flask, Response, abort, flash, jsonify, redirect, render_template, request,
                    session, url_for)
 
@@ -26,7 +27,14 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 import db
 
-app = Flask(__name__)
+BASE = os.path.dirname(os.path.abspath(__file__))
+try:  # plantillas y estilos copiados dentro de un .py (ver dev/embeber.py): sirven de respaldo si faltan las carpetas
+    from _embebidos import STATIC as _STATIC_EMB, TEMPLATES as _TEMPLATES_EMB
+except ImportError:
+    _STATIC_EMB, _TEMPLATES_EMB = {}, {}
+
+app = Flask(__name__, static_folder=None, template_folder=None)
+app.jinja_loader = ChoiceLoader([FileSystemLoader(os.path.join(BASE, "templates")), DictLoader(_TEMPLATES_EMB)])
 app.secret_key = os.environ.get("SECRET_KEY") or "cambia-esta-clave-en-produccion"
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
                   SESSION_COOKIE_SECURE=os.environ.get("TT_COOKIE_SECURE", "1") == "1",
@@ -266,6 +274,26 @@ def bloqueado():
     else:
         return redirect(url_for("login"))
     return render_template("bloqueado.html", titulo=t, detalle=d, procsis=PROCSIS_URL), 403
+
+
+_MIME = {".css": "text/css; charset=utf-8", ".js": "application/javascript; charset=utf-8"}
+
+
+@app.route("/static/<path:filename>", endpoint="static")
+def estatico(filename):
+    ext = os.path.splitext(filename)[1].lower()
+    ruta = os.path.join(BASE, "static", filename)
+    if ext in _MIME and ".." not in filename and os.path.isfile(ruta):
+        with open(ruta, "rb") as f:
+            cuerpo = f.read()
+    elif filename in _STATIC_EMB:
+        cuerpo = _STATIC_EMB[filename].encode("utf-8")
+    else:
+        abort(404)
+    r = Response(cuerpo, mimetype=_MIME.get(ext, "application/octet-stream").split(";")[0])
+    r.headers["Content-Type"] = _MIME.get(ext, "application/octet-stream")
+    r.headers["Cache-Control"] = "public, max-age=300"
+    return r
 
 
 @app.route("/salud")
