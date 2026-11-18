@@ -1,7 +1,7 @@
 """TiendaTrack · aplicación del negocio (productos, inventario, punto de venta, caja, clientes).
 Es una app aparte de PROCSIS. El acceso llega desde PROCSIS con un token firmado (SSO) y la vigencia
 de la cuenta (demo / plan activo / vencido) se consulta a la API de PROCSIS.
-Variables de entorno: SECRET_KEY, DATABASE_URL, PROCSIS_URL, TIENDATRACK_API_KEY. Ver README.md."""
+Variables de entorno: SECRET_KEY, DATABASE_URL, PROCSIS_URL, TIENDATRACK_API_KEY, RESEND_API_KEY, RESEND_FROM. Ver README.md."""
 import base64
 import calendar
 import csv
@@ -108,9 +108,29 @@ def f_dia(s):
         return s or "—"
 
 
+def _migrar_registro():
+    """Tabla de PINs y columnas extra del negocio. Es idempotente: si la columna ya existe, el ALTER falla y se ignora."""
+    for ddl in (
+        "CREATE TABLE IF NOT EXISTS registro_pins (email VARCHAR(160) PRIMARY KEY, pin_hash VARCHAR(80), intentos INTEGER DEFAULT 0, "
+        "vence VARCHAR(20), enviado_en VARCHAR(20))",
+        "ALTER TABLE negocios ADD COLUMN nit VARCHAR(30) DEFAULT ''",
+        "ALTER TABLE negocios ADD COLUMN titular VARCHAR(160) DEFAULT ''",
+        "ALTER TABLE negocios ADD COLUMN usuarios_est INTEGER DEFAULT 0",
+    ):
+        try:
+            db.x(ddl)
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+
 def _asegurar_tablas():
     if not _TABLAS["ok"]:
         db.crear_tablas()
+        _migrar_registro()
         _TABLAS["ok"] = True
 
 
@@ -172,11 +192,28 @@ def _negocio_de(email, info):
     if n:
         db.x("UPDATE negocios SET nombre=?, segmento=? WHERE id=?", limpio(info.get("negocio")) or email, limpio(info.get("segmento"), 20) or "tienda", n["id"])
         db.commit()
+        _guardar_extra(n["id"], info)
         return n["id"]
     nid = db.x("INSERT INTO negocios (email, nombre, segmento, creado_en) VALUES (?,?,?,?) RETURNING id",
                email, limpio(info.get("negocio")) or email, limpio(info.get("segmento"), 20) or "tienda", ahora_s())
     db.commit()
+    _guardar_extra(nid, info)
     return nid
+
+
+def _guardar_extra(negocio_id, info):
+    """NIT, titular y número de usuarios que PROCSIS tiene de la cuenta (si los hay). Nunca debe tumbar el inicio de sesión."""
+    nit, titular, usu = limpio(info.get("nit"), 30), limpio(info.get("titular")), entero(info.get("usuarios_est"), 0, 0, 1000)
+    if not (nit or titular or usu):
+        return
+    try:
+        db.x("UPDATE negocios SET nit=?, titular=?, usuarios_est=? WHERE id=?", nit, titular, usu, negocio_id)
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
 
 @app.route("/sso")
@@ -233,6 +270,7 @@ def login():
         return redirect(url_for("inicio"))
     error = ""
     email = ""
+    aviso = "Ese correo ya tiene una cuenta. Ingresa con tu clave o continúa con Google." if request.args.get("ya") else ""
     if request.method == "POST":
         email = limpio(request.form.get("email"), 160).lower()
         clave = request.form.get("clave") or ""
@@ -253,13 +291,306 @@ def login():
                     error = "No encontramos una cuenta activa con ese correo."
                 else:
                     return _iniciar_sesion(email, info)
-    return render_template("login.html", error=error, email=email, google=bool(PROCSIS_URL)), (401 if error else 200)
+    return render_template("login.html", error=error, aviso=aviso, email=email, google=bool(PROCSIS_URL), google_url=_google_url(),
+                           registro_url=url_for("registro"), planes_url=(PROCSIS_URL + "/tt") if PROCSIS_URL else "", dias_demo=DIAS_DEMO), (401 if error else 200)
 
 
 @app.route("/salir")
 def salir():
     session.clear()
     return redirect(url_for("login"))
+
+
+# ───────────────────────── registro propio: correo → PIN (Resend) → datos del negocio ─────────────────────────
+# Flujo: 1) el correo recibe un PIN de 6 dígitos por Resend, 2) se verifica el PIN (vence, máx. intentos),
+# 3) el formulario del negocio (nombre, NIT, usuarios...) crea la cuenta en PROCSIS con la demo gratis y abre la sesión.
+# Con Google no hace falta PIN: Google ya verificó el correo; ese camino lo atiende PROCSIS (/tt/google/inicio).
+DIAS_DEMO = 15
+PIN_VIDA_MIN, PIN_MAX_INTENTOS, PIN_ESPERA_S = 10, 5, 60
+PIN_ENVIOS_CORREO_H, PIN_ENVIOS_IP_H = 5, 15
+REG_VIDA_S = 30 * 60        # tiempo para terminar el formulario después de verificar el PIN
+SEGMENTOS = (("tienda", "Tienda"), ("ropa", "Tienda de ropa"), ("restaurante", "Restaurante"), ("otro", "Otro negocio"))
+_CORREO_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,120}\.[^@\s.]{2,}$")
+
+
+def _google_url():
+    return (PROCSIS_URL + "/tt/google/inicio") if PROCSIS_URL else ""
+
+
+def _csrf_reg():
+    t = session.get("rcsrf")
+    if not t:
+        t = secrets.token_urlsafe(24)
+        session["rcsrf"] = t
+    return t
+
+
+def _csrf_reg_ok():
+    return hmac.compare_digest(str(request.form.get("csrf") or ""), str(session.get("rcsrf") or "x"))
+
+
+def _pin_hash(email, pin):
+    return hmac.new(str(app.secret_key).encode(), ("pin|%s|%s" % (email, pin)).encode(), hashlib.sha256).hexdigest()
+
+
+def _conteo(clave, minutos):
+    desde = (ahora() - timedelta(minutes=minutos)).strftime("%Y-%m-%d %H:%M:%S")
+    return int(db.uno("SELECT COUNT(*) AS c FROM login_fallos WHERE clave=? AND creado_en>=?", clave, desde)["c"])
+
+
+def _anotar(*claves):
+    ts = ahora_s()
+    for k in claves:
+        db.x("INSERT INTO login_fallos (clave, creado_en) VALUES (?,?)", k, ts)
+    db.commit()
+
+
+def _oculto(email):
+    u, _, d = email.partition("@")
+    return u[:2] + "•" * max(1, len(u) - 2) + "@" + d
+
+
+def nit_normalizado(valor):
+    """NIT colombiano con o sin dígito de verificación. Devuelve (nit, error). Si trae DV, se valida."""
+    s = re.sub(r"[^0-9-]", "", str(valor or ""))
+    base, _, dv = s.partition("-")
+    if not base.isdigit() or not (5 <= len(base) <= 12):
+        return "", "Escribe un NIT o documento válido (solo números)."
+    pesos = (3, 7, 13, 17, 19, 23, 29, 37, 41, 43, 47, 53, 59, 67, 71)
+    r = sum(int(d) * p for d, p in zip(reversed(base), pesos)) % 11
+    calc = str(r if r < 2 else 11 - r)
+    if dv and dv != calc:
+        return "", "El dígito de verificación del NIT no coincide. Revísalo."
+    return base + "-" + calc, ""
+
+
+def _enviar_resend(para, asunto, html, texto):
+    """Envía un correo con Resend (HTTPS). Devuelve True si Resend lo aceptó."""
+    llave = (os.environ.get("RESEND_API_KEY") or "").strip()
+    if not llave:
+        if os.environ.get("TT_DEV_PIN") == "1":  # solo para pruebas locales: el PIN sale por el log
+            app.logger.warning("TT_DEV_PIN correo a %s: %s", para, texto)
+            return True
+        app.logger.error("Falta RESEND_API_KEY: no se puede enviar el PIN de registro.")
+        return False
+    de = (os.environ.get("RESEND_FROM") or "").strip() or "TiendaTrack <onboarding@resend.dev>"
+    cuerpo = json.dumps({"from": de, "to": [para], "subject": asunto, "html": html, "text": texto}).encode("utf-8")
+    req = urllib.request.Request("https://api.resend.com/emails", data=cuerpo, method="POST",
+                                 headers={"Authorization": "Bearer " + llave, "Content-Type": "application/json", "User-Agent": "tiendatrack-app/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return 200 <= r.status < 300
+    except urllib.error.HTTPError as e:
+        app.logger.error("Resend rechazó el envío (%s): %s", e.code, e.read()[:300])
+    except Exception:
+        app.logger.exception("Resend falló")
+    return False
+
+
+def _correo_pin(email, pin):
+    texto = ("Tu código de TiendaTrack es %s. Vence en %d minutos. "
+             "Si no lo pediste, ignora este correo." % (pin, PIN_VIDA_MIN))
+    html = (
+        '<div style="background:#eaf1ff;padding:28px 12px;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif">'
+        '<div style="max-width:440px;margin:0 auto;background:#ffffff;border-radius:20px;overflow:hidden;'
+        'box-shadow:0 12px 36px rgba(10,42,143,.16)">'
+        '<div style="height:6px;background:linear-gradient(90deg,#0a2a8f,#12b5ff,#1fdc6a)"></div>'
+        '<div style="padding:28px 28px 24px">'
+        '<div style="font-size:22px;font-weight:800;color:#0a2a8f;letter-spacing:-.02em">Tienda<span style="color:#1fb85a">Track</span></div>'
+        '<p style="color:#0b1437;font-size:16px;margin:18px 0 6px">Tu código para crear tu cuenta:</p>'
+        '<div style="font-size:38px;font-weight:800;letter-spacing:.35em;color:#0a2a8f;background:#eef3ff;border-radius:14px;'
+        'padding:16px 8px 16px 20px;text-align:center;margin:10px 0 16px">%s</div>'
+        '<p style="color:#4b5b86;font-size:14px;line-height:1.5;margin:0">Vence en %d minutos. Si no lo pediste, ignora este correo: '
+        'nadie podrá crear una cuenta con tu correo sin este código.</p>'
+        '</div></div>'
+        '<p style="text-align:center;color:#6b7aa3;font-size:12px;margin:14px 0 0">TiendaTrack · un producto de PROCSIS</p></div>'
+    ) % (pin, PIN_VIDA_MIN)
+    return _enviar_resend(email, "Tu código de TiendaTrack: " + pin, html, texto)
+
+
+def _emitir_pin(email):
+    """Genera, guarda y envía un PIN. Devuelve (ok, mensaje_de_error)."""
+    if _conteo("pin:e:" + email, 60) >= PIN_ENVIOS_CORREO_H or _conteo("pin:i:" + _ip(), 60) >= PIN_ENVIOS_IP_H:
+        return False, "Pediste demasiados códigos. Espera un rato e inténtalo de nuevo."
+    pin = "%06d" % secrets.randbelow(10 ** 6)
+    ts = ahora_s()
+    vence = (ahora() + timedelta(minutes=PIN_VIDA_MIN)).strftime("%Y-%m-%d %H:%M:%S")
+    db.x("DELETE FROM registro_pins WHERE email=?", email)
+    db.x("INSERT INTO registro_pins (email, pin_hash, intentos, vence, enviado_en) VALUES (?,?,0,?,?)", email, _pin_hash(email, pin), vence, ts)
+    _anotar("pin:e:" + email, "pin:i:" + _ip())
+    if not _correo_pin(email, pin):
+        db.x("DELETE FROM registro_pins WHERE email=?", email)
+        db.commit()
+        return False, "No pudimos enviar el código. Revisa el correo e inténtalo de nuevo en un minuto."
+    return True, ""
+
+
+def _espera_reenvio(email):
+    f = db.uno("SELECT enviado_en FROM registro_pins WHERE email=?", email)
+    if not f:
+        return 0
+    try:
+        t = datetime.strptime(f["enviado_en"], "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return 0
+    return max(0, PIN_ESPERA_S - int((ahora() - t).total_seconds()))
+
+
+def _ctx_registro(paso, **extra):
+    base = dict(paso=paso, rcsrf=_csrf_reg(), google_url=_google_url(), dias_demo=DIAS_DEMO, vida_min=PIN_VIDA_MIN, procsis=PROCSIS_URL,
+                email=session.get("reg_email", ""), email_oculto=_oculto(session["reg_email"]) if session.get("reg_email") else "",
+                segmentos=SEGMENTOS, error="", aviso="", f={})
+    base.update(extra)
+    return base
+
+
+@app.route("/registro", methods=["GET", "POST"])
+def registro():
+    if session.get("neg_id") and session.get("acc"):
+        return redirect(url_for("inicio"))
+    if request.args.get("cambiar"):
+        session.pop("reg_email", None)
+        session.pop("reg_ok", None)
+    error, email = "", limpio(request.form.get("email"), 160).lower() if request.method == "POST" else session.get("reg_email", "")
+    if request.method == "POST":
+        if not _csrf_reg_ok():
+            error = "La página venció. Recárgala e inténtalo de nuevo."
+        elif not _CORREO_RE.match(email):
+            error = "Escribe un correo válido."
+        else:
+            # mismo trato exista o no la cuenta: así no se puede averiguar qué correos están registrados
+            if session.get("reg_email") == email and _espera_reenvio(email) > 0:
+                return redirect(url_for("registro_pin"))  # ya se envió hace poco: no se manda otro
+            ok, msg = _emitir_pin(email)
+            if ok:
+                session["reg_email"] = email
+                session.pop("reg_ok", None)
+                return redirect(url_for("registro_pin"))
+            error = msg
+    return render_template("registro.html", **_ctx_registro(1, error=error, email=email)), (400 if error else 200)
+
+
+@app.route("/registro/pin", methods=["GET", "POST"])
+def registro_pin():
+    email = session.get("reg_email")
+    if not email:
+        return redirect(url_for("registro"))
+    error = aviso = ""
+    if request.method == "POST":
+        accion = request.form.get("accion")
+        if not _csrf_reg_ok():
+            error = "La página venció. Recárgala e inténtalo de nuevo."
+        elif accion == "reenviar":
+            espera = _espera_reenvio(email)
+            if espera > 0:
+                error = "Espera %d segundos para pedir otro código." % espera
+            else:
+                ok, msg = _emitir_pin(email)
+                aviso, error = ("Te enviamos un código nuevo.", "") if ok else ("", msg)
+        else:
+            pin = re.sub(r"\D", "", request.form.get("pin") or "")[:6]
+            fila = db.uno("SELECT pin_hash, intentos, vence FROM registro_pins WHERE email=?", email)
+            if not fila or fila["vence"] < ahora_s():
+                error = "El código venció. Pide uno nuevo."
+            elif int(fila["intentos"]) >= PIN_MAX_INTENTOS:
+                db.x("DELETE FROM registro_pins WHERE email=?", email)
+                db.commit()
+                error = "Demasiados intentos. Pide un código nuevo."
+            elif len(pin) != 6 or not hmac.compare_digest(_pin_hash(email, pin), fila["pin_hash"]):
+                db.x("UPDATE registro_pins SET intentos=intentos+1 WHERE email=?", email)
+                db.commit()
+                quedan = PIN_MAX_INTENTOS - int(fila["intentos"]) - 1
+                error = "Código incorrecto. Te quedan %d intento%s." % (max(0, quedan), "" if quedan == 1 else "s")
+            else:
+                db.x("DELETE FROM registro_pins WHERE email=?", email)
+                db.commit()
+                session["reg_ok"] = int(time.time())
+                return redirect(url_for("registro_datos"))
+    return render_template("registro.html", **_ctx_registro(2, error=error, aviso=aviso)), (400 if error else 200)
+
+
+def _crear_cuenta_procsis(datos):
+    """Crea la cuenta (con su demo) en PROCSIS. Devuelve (código_http, json). Código 0 = no hubo respuesta."""
+    if not (PROCSIS_URL and API_KEY):
+        return 503, {}
+    req = urllib.request.Request(PROCSIS_URL + "/api/v1/tiendatrack/registro", data=json.dumps(datos).encode("utf-8"), method="POST",
+                                 headers={"X-API-Key": API_KEY, "Content-Type": "application/json", "User-Agent": "tiendatrack-app"})
+    try:
+        with urllib.request.urlopen(req, timeout=12) as r:
+            return r.status, json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode("utf-8"))
+        except Exception:
+            return e.code, {}
+    except Exception:
+        return 0, {}
+
+
+@app.route("/registro/datos", methods=["GET", "POST"])
+def registro_datos():
+    email = session.get("reg_email")
+    if not email or int(time.time()) - int(session.get("reg_ok") or 0) > REG_VIDA_S:
+        session.pop("reg_ok", None)
+        return redirect(url_for("registro"))
+    error, f = "", {}
+    if request.method == "GET":
+        info = _consultar_procsis(email)   # el correo ya está probado con el PIN, así que aquí sí se puede decir si existe
+        if info and info.get("ok"):
+            session.pop("reg_email", None)
+            session.pop("reg_ok", None)
+            return redirect(url_for("login", ya=1))
+    else:
+        f = {"nombre": limpio(request.form.get("nombre")), "negocio": limpio(request.form.get("negocio")), "nit": limpio(request.form.get("nit"), 20),
+             "usuarios": entero(request.form.get("usuarios"), 1, 0, 1000), "segmento": request.form.get("segmento") or "tienda",
+             "telefono": re.sub(r"[^0-9+]", "", request.form.get("telefono") or "")[:20], "acepto": bool(request.form.get("acepto"))}
+        clave, repite = request.form.get("clave") or "", request.form.get("repite") or ""
+        nit, err_nit = nit_normalizado(f["nit"])
+        if not _csrf_reg_ok():
+            error = "La página venció. Recárgala e inténtalo de nuevo."
+        elif len(f["nombre"]) < 2:
+            error = "Escribe tu nombre."
+        elif len(f["negocio"]) < 2:
+            error = "Escribe el nombre de tu negocio."
+        elif err_nit:
+            error = err_nit
+        elif not 1 <= f["usuarios"] <= 50:
+            error = "Indica cuántas personas usarán el sistema (de 1 a 50)."
+        elif f["segmento"] not in dict(SEGMENTOS):
+            error = "Elige el tipo de negocio."
+        elif f["telefono"] and not 7 <= len(f["telefono"].lstrip("+")) <= 15:
+            error = "El WhatsApp no parece válido. Déjalo vacío si prefieres no darlo."
+        elif len(clave) < 8 or not re.search(r"[A-Za-z]", clave) or not re.search(r"\d", clave):
+            error = "La clave debe tener mínimo 8 caracteres, con letras y números."
+        elif clave != repite:
+            error = "Las dos claves no coinciden."
+        elif not f["acepto"]:
+            error = "Debes aceptar los términos y el tratamiento de datos para continuar."
+        elif _conteo("reg:i:" + _ip(), 60) >= 10:
+            error = "Demasiados intentos desde tu conexión. Espera un rato."
+        else:
+            _anotar("reg:i:" + _ip())
+            codigo, resp = _crear_cuenta_procsis({"email": email, "titular": f["nombre"], "negocio": f["negocio"], "nit": nit, "usuarios_est": f["usuarios"],
+                                                  "segmento": f["segmento"], "telefono": f["telefono"], "acepto": True, "email_verificado": True})
+            if codigo in (200, 201) and resp.get("ok"):
+                nuevo_id_info = dict(resp, nit=nit, titular=f["nombre"], usuarios_est=f["usuarios"])
+                neg = _negocio_de(email, nuevo_id_info)
+                db.x("UPDATE negocios SET clave_hash=? WHERE id=?", generate_password_hash(clave, method="pbkdf2:sha256"), neg)
+                db.commit()
+                salida = _iniciar_sesion(email, nuevo_id_info)
+                flash("¡Bienvenido a TiendaTrack! Tu demo de %d días ya está activa." % int(resp.get("dias_restantes") or DIAS_DEMO), "ok")
+                return salida
+            if codigo == 409:
+                session.pop("reg_email", None)
+                session.pop("reg_ok", None)
+                return redirect(url_for("login", ya=1))
+            if codigo == 403:
+                error = "El registro aún no está abierto. Vuelve pronto."
+            elif codigo == 400 and resp.get("error"):
+                error = str(resp["error"])[:200]
+            else:
+                error = "No pudimos crear tu cuenta ahora. Intenta de nuevo en un minuto."
+    return render_template("registro.html", **_ctx_registro(3, error=error, f=f)), (400 if error else 200)
 
 
 @app.route("/bloqueado")
@@ -276,7 +607,8 @@ def bloqueado():
     return render_template("bloqueado.html", titulo=t, detalle=d, procsis=PROCSIS_URL), 403
 
 
-_MIME = {".css": "text/css; charset=utf-8", ".js": "application/javascript; charset=utf-8"}
+_MIME = {".css": "text/css; charset=utf-8", ".js": "application/javascript; charset=utf-8", ".png": "image/png", ".webp": "image/webp",
+         ".svg": "image/svg+xml", ".ico": "image/x-icon", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 
 
 @app.route("/static/<path:filename>", endpoint="static")
@@ -302,7 +634,7 @@ def salud():
 
 
 # ───────────────────────── guardia global ─────────────────────────
-_LIBRES = {"sso", "login", "salir", "bloqueado", "salud", "static"}
+_LIBRES = {"sso", "login", "salir", "bloqueado", "salud", "static", "registro", "registro_pin", "registro_datos"}
 
 
 @app.before_request
