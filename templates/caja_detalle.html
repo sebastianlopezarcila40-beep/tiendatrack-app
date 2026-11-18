@@ -1,0 +1,12 @@
+{% extends "base.html" %}{% block titulo %}Cierre de caja{% endblock %}
+{% block cuerpo %}
+<div class="cab"><h1>Cierre de caja #{{ c.id }}</h1><a class="btn" href="{{ url_for('caja') }}">Volver</a></div>
+<div class="card"><table>
+<tr><td>Abierta</td><td class="der">{{ c.abierta_en|fecha }}</td></tr><tr><td>Cerrada</td><td class="der">{{ c.cerrada_en|fecha if c.cerrada_en else 'Abierta' }}</td></tr>
+<tr><td>Ventas</td><td class="der">{{ nventas }}</td></tr><tr><td>Total vendido</td><td class="der">{{ total|cop }}</td></tr>
+{% for k, nombre in METODOS %}{% if por.get(k) %}<tr><td>&nbsp;&nbsp;{{ nombre }}</td><td class="der">{{ por[k].t|cop }}</td></tr>{% endif %}{% endfor %}
+<tr><td>Base inicial</td><td class="der">{{ c.base|cop }}</td></tr>
+{% if c.estado == 'cerrada' %}<tr><td>Efectivo esperado (al cierre)</td><td class="der">{{ c.esperado|cop }}</td></tr><tr><td>Efectivo contado</td><td class="der">{{ c.contado|cop }}</td></tr>
+<tr><td><b>Diferencia</b></td><td class="der"><b class="{{ 'bajo' if c.contado != c.esperado }}">{{ (c.contado - c.esperado)|cop }}</b></td></tr>{% if c.nota %}<tr><td>Nota</td><td class="der">{{ c.nota }}</td></tr>{% endif %}{% endif %}
+</table></div>
+{% endblock %}

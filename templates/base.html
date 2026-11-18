@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>{% block titulo %}TiendaTrack{% endblock %} · TiendaTrack</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+<div class="shell">
+  <aside class="side">
+    <a class="marca" href="{{ url_for('inicio') }}">Tienda<b>Track</b></a>
+    <div class="neg">{{ negocio }}</div>
+    <nav>
+      {% set items = [('inicio','Inicio','inicio'),('pos','Vender','pos'),('productos','Productos','productos'),('inventario','Inventario','inventario'),('clientes','Clientes','clientes'),('ventas','Ventas','ventas'),('caja','Caja','caja')] %}
+      {% for ep, texto, clave in items %}
+        <a href="{{ url_for(ep) }}" class="{{ 'on' if pagina == clave else '' }}">{{ texto }}</a>
+      {% endfor %}
+    </nav>
+    <div class="pie-side">
+      {% if plan.nombre %}<div class="chip">Plan {{ plan.nombre }}</div>{% endif %}
+      <div class="peq">{% if estado == 'demo' %}Demo: {{ dias }} día{{ '' if dias == 1 else 's' }}{% elif estado == 'activo' %}Activo hasta {{ vence|dia }}{% endif %}</div>
+      <a class="peq" href="{{ url_for('salir') }}">Salir</a>
+    </div>
+  </aside>
+  <main class="main">
+    {% if estado == 'demo' and dias <= 3 %}<div class="aviso">Tu demo termina en {{ dias }} día{{ '' if dias == 1 else 's' }}. {% if procsis %}<a href="{{ procsis }}/tt/cuenta">Elegir plan</a>{% endif %}</div>{% endif %}
+    {% with msgs = get_flashed_messages(with_categories=true) %}
+      {% for cat, m in msgs %}<div class="flash {{ cat }}">{{ m }}</div>{% endfor %}
+    {% endwith %}
+    {% block cuerpo %}{% endblock %}
+  </main>
+</div>
+</body>
+</html>

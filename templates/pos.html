@@ -1,0 +1,27 @@
+{% extends "base.html" %}{% block titulo %}Vender{% endblock %}
+{% block cuerpo %}
+<div class="pos">
+  <section class="pos-prod">
+    <input id="buscar" class="grande" placeholder="Buscar producto o escanear código…" autocomplete="off" autofocus>
+    <div id="lista" class="rejilla"></div>
+  </section>
+  <section class="pos-carro card">
+    <h3>Venta actual</h3>
+    <div id="carro" class="carro"></div>
+    <div class="totales">
+      <div><span>Subtotal</span><b id="subtotal">$0</b></div>
+      <div><span>Descuento</span><input id="descuento" inputmode="numeric" placeholder="0"></div>
+      <div class="gran"><span>Total</span><b id="total">$0</b></div>
+    </div>
+    <label>Cliente (opcional)<select id="cliente"><option value="">Consumidor final</option>{% for c in clis %}<option value="{{ c.id }}">{{ c.nombre }}{% if c.documento %} · {{ c.documento }}{% endif %}</option>{% endfor %}</select></label>
+    <label>Método de pago<select id="metodo">{% for k, n in METODOS %}<option value="{{ k }}">{{ n }}</option>{% endfor %}</select></label>
+    <div id="caja-efectivo"><label>Efectivo recibido<input id="recibido" inputmode="numeric" placeholder="0"></label><div class="cambio">Cambio: <b id="cambio">$0</b></div></div>
+    <div id="error" class="flash err" hidden></div>
+    <button id="cobrar" class="btn pri grande" disabled>Cobrar</button>
+    <button id="vaciar" class="btn">Vaciar</button>
+  </section>
+</div>
+<script id="datos" type="application/json">{{ prods|tojson }}</script>
+<script>window.TT_CSRF = {{ csrf|tojson }}; window.TT_COBRAR = {{ url_for('pos_cobrar')|tojson }}; window.TT_RECIBO = "/ventas/";</script>
+<script src="{{ url_for('static', filename='pos.js') }}"></script>
+{% endblock %}

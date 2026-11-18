@@ -1,0 +1,23 @@
+{% extends "base.html" %}{% block titulo %}Inicio{% endblock %}
+{% block cuerpo %}
+<div class="cab"><h1>Hola, {{ negocio }}</h1>
+{% if caja %}<a class="btn pri" href="{{ url_for('pos') }}">Ir a vender</a>{% else %}<a class="btn pri" href="{{ url_for('caja') }}">Abrir caja</a>{% endif %}</div>
+<div class="tiles">
+  <div class="tile"><span>Ventas hoy</span><b>{{ ventas_hoy }}</b></div>
+  <div class="tile"><span>Total vendido hoy</span><b>{{ total_hoy|cop }}</b></div>
+  <div class="tile"><span>Ticket promedio</span><b>{{ ticket|cop }}</b></div>
+  <div class="tile {{ 'warn' if n_bajo else '' }}"><span>Stock bajo</span><b>{{ n_bajo }}</b></div>
+</div>
+{% if n_prod == 0 %}<div class="card vacio"><h3>Empieza cargando tus productos</h3><p>Crea al menos un producto para poder vender.</p><a class="btn pri" href="{{ url_for('producto_nuevo') }}">Crear primer producto</a></div>{% endif %}
+<div class="dos">
+  <div class="card"><h3>Ventas de los últimos 7 días</h3>
+    <div class="barras">{% for s in serie %}<div class="barra"><i style="height:{{ s.h }}%" title="{{ s.t|cop }}"></i><small>{{ s.d|dia }}</small></div>{% endfor %}</div>
+  </div>
+  <div class="card"><h3>Lo más vendido (7 días)</h3>
+    {% if top %}<table>{% for t in top %}<tr><td>{{ t.nombre }}</td><td class="der">{{ t.u }} u.</td><td class="der">{{ t.t|cop }}</td></tr>{% endfor %}</table>{% else %}<p class="muted">Aún no hay ventas.</p>{% endif %}
+  </div>
+</div>
+{% if bajo %}<div class="card"><h3>Productos por reponer</h3><table>
+{% for b in bajo %}<tr><td>{{ b.nombre }}</td><td class="der">{{ b.stock }} en stock (mín. {{ b.stock_minimo }})</td></tr>{% endfor %}</table>
+<p><a href="{{ url_for('inventario') }}">Ir a inventario</a></p></div>{% endif %}
+{% endblock %}

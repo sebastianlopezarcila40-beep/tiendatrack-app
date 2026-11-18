@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
+<title>{{ titulo }} · TiendaTrack</title><link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}"></head>
+<body class="centro"><div class="caja-centro">
+<div class="marca grande">Tienda<b>Track</b></div>
+<h1>{{ titulo }}</h1><p>{{ detalle }}</p>
+{% if volver %}<p><a class="btn" href="javascript:history.back()">Volver</a></p>{% endif %}
+{% if procsis %}<p><a class="btn pri" href="{{ procsis }}/tt/cuenta">Ir a mi cuenta de PROCSIS</a></p>{% endif %}
+</div></body></html>

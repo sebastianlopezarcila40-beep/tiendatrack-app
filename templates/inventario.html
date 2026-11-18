@@ -1,0 +1,20 @@
+{% extends "base.html" %}{% block titulo %}Inventario{% endblock %}
+{% block cuerpo %}
+<div class="cab"><h1>Inventario</h1></div>
+<form class="barra-filtro" method="get"><input name="q" value="{{ buscar }}" placeholder="Buscar producto"><button class="btn">Buscar</button></form>
+<div class="card scroll"><table>
+<tr><th>Producto</th><th class="der">Stock</th><th class="der">Mínimo</th><th>Movimiento</th></tr>
+{% for p in filas %}<tr>
+  <td><b>{{ p.nombre }}</b><br><small class="muted">{{ p.sku }}</small></td>
+  <td class="der"><span class="{{ 'bajo' if p.stock <= p.stock_minimo else '' }}">{{ p.stock }}</span></td><td class="der">{{ p.stock_minimo }}</td>
+  <td><form class="mov" method="post" action="{{ url_for('inventario_mover') }}">
+    <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="producto_id" value="{{ p.id }}"><input type="hidden" name="q" value="{{ buscar }}">
+    <select name="tipo"><option value="entrada">Entrada (+)</option><option value="salida">Salida / merma (−)</option><option value="ajuste">Conteo real (=)</option></select>
+    <input name="cantidad" inputmode="numeric" placeholder="Cant." required><input name="nota" placeholder="Nota (opcional)" maxlength="200"><button class="btn peq">Aplicar</button></form></td>
+</tr>{% else %}<tr><td colspan="4" class="muted">No hay productos con inventario. Crea uno en Productos.</td></tr>{% endfor %}
+</table></div>
+<div class="card scroll"><h3>Últimos movimientos</h3><table>
+<tr><th>Fecha</th><th>Producto</th><th>Tipo</th><th class="der">Cantidad</th><th>Nota</th></tr>
+{% for m in movs %}<tr><td>{{ m.creado_en|fecha }}</td><td>{{ m.producto }}</td><td>{{ m.tipo }}</td><td class="der">{{ '+' if m.cantidad > 0 }}{{ m.cantidad }}</td><td>{{ m.nota }}</td></tr>
+{% else %}<tr><td colspan="5" class="muted">Sin movimientos.</td></tr>{% endfor %}</table></div>
+{% endblock %}

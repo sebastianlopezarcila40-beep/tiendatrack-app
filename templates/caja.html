@@ -1,0 +1,28 @@
+{% extends "base.html" %}{% block titulo %}Caja{% endblock %}
+{% block cuerpo %}
+<div class="cab"><h1>Caja</h1></div>
+{% if not abierta %}
+<form class="card form" method="post"><h3>Abrir caja</h3><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="accion" value="abrir">
+  <label>Efectivo con el que empiezas (base)<input name="base" inputmode="numeric" value="0"></label>
+  <div class="acciones"><button class="btn pri">Abrir caja</button></div></form>
+{% else %}
+{% set por, efectivo, total, nventas, esperado = resumen %}
+<div class="tiles">
+  <div class="tile"><span>Abierta desde</span><b class="mid">{{ abierta.abierta_en|fecha }}</b></div>
+  <div class="tile"><span>Ventas del turno</span><b>{{ nventas }}</b></div>
+  <div class="tile"><span>Total vendido</span><b>{{ total|cop }}</b></div>
+  <div class="tile"><span>Efectivo esperado</span><b>{{ esperado|cop }}</b></div>
+</div>
+<div class="card"><h3>Por método de pago</h3><table>
+{% for k, nombre in METODOS %}{% if por.get(k) %}<tr><td>{{ nombre }}</td><td class="der">{{ por[k].c }} venta(s)</td><td class="der">{{ por[k].t|cop }}</td></tr>{% endif %}{% endfor %}
+<tr><td>Base inicial</td><td></td><td class="der">{{ abierta.base|cop }}</td></tr></table></div>
+<form class="card form" method="post"><h3>Cerrar caja</h3><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="accion" value="cerrar">
+  <label>Efectivo contado en caja<input name="contado" inputmode="numeric" required></label>
+  <label>Nota (opcional)<input name="nota" maxlength="200"></label>
+  <div class="acciones"><button class="btn pri">Cerrar caja</button><a class="btn" href="{{ url_for('pos') }}">Seguir vendiendo</a></div></form>
+{% endif %}
+{% if historial %}<div class="card scroll"><h3>Cierres anteriores</h3><table>
+<tr><th>Abierta</th><th>Cerrada</th><th class="der">Esperado</th><th class="der">Contado</th><th class="der">Diferencia</th><th></th></tr>
+{% for c in historial %}{% set dif = c.contado - c.esperado %}<tr><td>{{ c.abierta_en|fecha }}</td><td>{{ c.cerrada_en|fecha }}</td><td class="der">{{ c.esperado|cop }}</td><td class="der">{{ c.contado|cop }}</td>
+<td class="der {{ 'bajo' if dif != 0 }}">{{ dif|cop }}</td><td class="der"><a href="{{ url_for('caja_detalle', cid=c.id) }}">Ver</a></td></tr>{% endfor %}</table></div>{% endif %}
+{% endblock %}

@@ -1,0 +1,19 @@
+{% extends "base.html" %}{% block titulo %}Clientes{% endblock %}
+{% block cuerpo %}
+<div class="cab"><h1>Clientes</h1></div>
+<form class="card form" method="post">
+  <h3>{{ 'Editar cliente' if editar else 'Nuevo cliente' }}</h3>
+  <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="id" value="{{ editar.id if editar else '' }}">
+  <div class="fila"><label>Nombre<input name="nombre" value="{{ editar.nombre if editar else '' }}" required maxlength="160"></label>
+  <label>Cédula / NIT<input name="documento" value="{{ editar.documento if editar else '' }}" maxlength="30"></label></div>
+  <div class="fila"><label>Teléfono<input name="telefono" value="{{ editar.telefono if editar else '' }}" maxlength="30"></label>
+  <label>Correo<input name="email" type="email" value="{{ editar.email if editar else '' }}" maxlength="160"></label></div>
+  <div class="acciones"><button class="btn pri">Guardar</button>{% if editar %}<a class="btn" href="{{ url_for('clientes') }}">Cancelar</a>{% endif %}</div>
+</form>
+<form class="barra-filtro" method="get"><input name="q" value="{{ buscar }}" placeholder="Buscar por nombre, documento o teléfono"><button class="btn">Buscar</button></form>
+<div class="card scroll"><table>
+<tr><th>Cliente</th><th>Documento</th><th>Teléfono</th><th class="der">Compras</th><th class="der">Total</th><th></th></tr>
+{% for c in filas %}<tr><td><b>{{ c.nombre }}</b><br><small class="muted">{{ c.email }}</small></td><td>{{ c.documento or '—' }}</td><td>{{ c.telefono or '—' }}</td>
+<td class="der">{{ c.compras }}</td><td class="der">{{ c.gastado|cop }}</td><td class="der"><a class="btn peq" href="{{ url_for('clientes', editar=c.id) }}">Editar</a></td></tr>
+{% else %}<tr><td colspan="6" class="muted">Aún no hay clientes.</td></tr>{% endfor %}</table></div>
+{% endblock %}

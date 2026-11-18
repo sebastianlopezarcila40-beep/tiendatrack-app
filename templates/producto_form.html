@@ -1,0 +1,23 @@
+{% extends "base.html" %}{% block titulo %}{{ 'Nuevo producto' if nuevo else 'Editar producto' }}{% endblock %}
+{% block cuerpo %}
+<div class="cab"><h1>{{ 'Nuevo producto' if nuevo else 'Editar producto' }}</h1></div>
+<form class="card form" method="post">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Nombre<input name="nombre" value="{{ p.nombre }}" required maxlength="160" autofocus></label>
+  <div class="fila">
+    <label>Código / SKU / barras<input name="sku" value="{{ p.sku }}" maxlength="60"></label>
+    <label>Categoría<input name="categoria" value="{{ p.categoria }}" list="cats" maxlength="80"><datalist id="cats">{% for c in cats %}<option value="{{ c }}">{% endfor %}</datalist></label>
+  </div>
+  <div class="fila">
+    <label>Precio de venta (COP)<input name="precio" value="{{ p.precio }}" inputmode="numeric" required></label>
+    <label>Costo (COP)<input name="costo" value="{{ p.costo }}" inputmode="numeric"></label>
+  </div>
+  <label class="check"><input type="checkbox" name="controla_stock" value="1" {{ 'checked' if p.controla_stock }}> Controlar inventario de este producto</label>
+  <div class="fila">
+    {% if nuevo %}<label>Stock inicial<input name="stock" value="{{ p.stock }}" inputmode="numeric"></label>
+    {% else %}<label>Stock actual<input value="{{ p.stock }}" disabled><small class="muted">Se cambia desde Inventario para dejar historial.</small></label>{% endif %}
+    <label>Stock mínimo (alerta)<input name="stock_minimo" value="{{ p.stock_minimo }}" inputmode="numeric"></label>
+  </div>
+  <div class="acciones"><button class="btn pri">Guardar</button><a class="btn" href="{{ url_for('productos') }}">Cancelar</a></div>
+</form>
+{% endblock %}

@@ -1,0 +1,13 @@
+{% extends "base.html" %}{% block titulo %}Ventas{% endblock %}
+{% block cuerpo %}
+<div class="cab"><h1>Ventas</h1><a class="btn" href="{{ url_for('ventas_csv', desde=desde, hasta=hasta, metodo=metodo) }}">Descargar CSV</a></div>
+<form class="barra-filtro" method="get">
+  <label>Desde <input type="date" name="desde" value="{{ desde }}"></label><label>Hasta <input type="date" name="hasta" value="{{ hasta }}"></label>
+  <select name="metodo"><option value="">Todos los métodos</option>{% for k, n in METODOS %}<option value="{{ k }}" {{ 'selected' if metodo == k }}>{{ n }}</option>{% endfor %}</select>
+  <button class="btn">Filtrar</button></form>
+<div class="card scroll"><p class="muted">Total vendido en el rango (sin anuladas): <b>{{ total|cop }}</b></p><table>
+<tr><th>N.º</th><th>Fecha</th><th>Cliente</th><th>Método</th><th class="der">Total</th><th>Estado</th><th></th></tr>
+{% for v in filas %}<tr class="{{ 'anulada' if v.estado == 'anulada' }}"><td>#{{ v.numero }}</td><td>{{ v.creado_en|fecha }}</td><td>{{ v.cliente or '—' }}</td>
+<td>{{ dict(METODOS).get(v.metodo, v.metodo) }}</td><td class="der">{{ v.total|cop }}</td><td>{{ v.estado }}</td><td class="der"><a href="{{ url_for('venta_detalle', vid=v.id) }}">Ver</a></td></tr>
+{% else %}<tr><td colspan="7" class="muted">No hay ventas en ese rango.</td></tr>{% endfor %}</table></div>
+{% endblock %}

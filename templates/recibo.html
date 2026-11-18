@@ -1,0 +1,16 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Recibo #{{ v.numero }}</title>
+<style>body{font-family:ui-monospace,Menlo,Consolas,monospace;max-width:330px;margin:16px auto;padding:0 10px;color:#000;font-size:13px}
+h1{font-size:16px;text-align:center;margin:0}p{margin:3px 0}.c{text-align:center}hr{border:0;border-top:1px dashed #000;margin:8px 0}
+table{width:100%;border-collapse:collapse}td{padding:2px 0;vertical-align:top}.d{text-align:right}.b{font-weight:bold}
+.acc{text-align:center;margin:14px 0}.acc a,.acc button{font:inherit;padding:6px 12px;margin:2px;border:1px solid #000;background:#fff;cursor:pointer;text-decoration:none;color:#000}
+@media print{.acc{display:none}}</style></head><body>
+<h1>{{ negocio }}</h1><p class="c">Comprobante de venta #{{ v.numero }}{% if v.estado == 'anulada' %} · ANULADA{% endif %}</p><p class="c">{{ v.creado_en|fecha }}</p>
+{% if v.cliente %}<p>Cliente: {{ v.cliente }}{% if v.cliente_doc %} · {{ v.cliente_doc }}{% endif %}</p>{% endif %}<hr>
+<table>{% for i in items %}<tr><td colspan="2">{{ i.nombre }}</td></tr><tr><td>{{ i.cantidad }} x {{ i.precio|cop }}</td><td class="d">{{ i.total|cop }}</td></tr>{% endfor %}</table><hr>
+<table><tr><td>Subtotal</td><td class="d">{{ v.subtotal|cop }}</td></tr>{% if v.descuento %}<tr><td>Descuento</td><td class="d">−{{ v.descuento|cop }}</td></tr>{% endif %}
+<tr class="b"><td>TOTAL</td><td class="d">{{ v.total|cop }}</td></tr><tr><td>Pago ({{ dict(METODOS).get(v.metodo, v.metodo) }})</td><td class="d">{{ v.recibido|cop }}</td></tr>
+{% if v.metodo == 'efectivo' %}<tr><td>Cambio</td><td class="d">{{ v.cambio|cop }}</td></tr>{% endif %}</table><hr>
+<p class="c">Gracias por tu compra.<br>Este comprobante no es factura electrónica DIAN.</p>
+<div class="acc"><button onclick="window.print()">Imprimir</button>{% if nuevo %}<a href="{{ url_for('pos') }}">Nueva venta</a>{% else %}<a href="javascript:window.close()">Cerrar</a>{% endif %}</div>
+{% if nuevo %}<script>window.addEventListener('load',function(){setTimeout(function(){window.print()},300)})</script>{% endif %}
+</body></html>

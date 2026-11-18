@@ -1,0 +1,20 @@
+{% extends "base.html" %}{% block titulo %}Productos{% endblock %}
+{% block cuerpo %}
+<div class="cab"><h1>Productos <small>({{ total }}{% if plan.max_productos %} de {{ plan.max_productos }}{% endif %})</small></h1>
+<a class="btn pri" href="{{ url_for('producto_nuevo') }}">Nuevo producto</a></div>
+<form class="barra-filtro" method="get">
+  <input name="q" value="{{ buscar }}" placeholder="Buscar por nombre o código">
+  <select name="f" onchange="this.form.submit()">
+    <option value="">Activos</option><option value="bajo" {{ 'selected' if filtro=='bajo' }}>Stock bajo</option><option value="inactivos" {{ 'selected' if filtro=='inactivos' }}>Desactivados</option>
+  </select><button class="btn">Buscar</button>
+</form>
+<div class="card scroll"><table>
+<tr><th>Producto</th><th>Código</th><th>Categoría</th><th class="der">Precio</th><th class="der">Stock</th><th></th></tr>
+{% for p in filas %}<tr>
+  <td><b>{{ p.nombre }}</b></td><td>{{ p.sku or '—' }}</td><td>{{ p.categoria or '—' }}</td><td class="der">{{ p.precio|cop }}</td>
+  <td class="der">{% if p.controla_stock %}<span class="{{ 'bajo' if p.stock <= p.stock_minimo else '' }}">{{ p.stock }}</span>{% else %}<span class="muted">sin control</span>{% endif %}</td>
+  <td class="der"><a class="btn peq" href="{{ url_for('producto_editar', pid=p.id) }}">Editar</a>
+    <form class="en-linea" method="post" action="{{ url_for('producto_estado', pid=p.id) }}"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn peq">{{ 'Desactivar' if p.activo else 'Reactivar' }}</button></form></td>
+</tr>{% else %}<tr><td colspan="6" class="muted">No hay productos para mostrar.</td></tr>{% endfor %}
+</table></div>
+{% endblock %}
