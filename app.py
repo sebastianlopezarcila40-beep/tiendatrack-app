@@ -634,7 +634,7 @@ def salud():
 
 
 # ───────────────────────── guardia global ─────────────────────────
-_LIBRES = {"sso", "login", "salir", "bloqueado", "salud", "static", "registro", "registro_pin", "registro_datos"}
+_LIBRES = {"sso", "login", "salir", "bloqueado", "salud", "static", "registro", "registro_pin", "registro_datos", "pqr", "puntos_atencion"}
 
 
 @app.before_request
@@ -1190,7 +1190,7 @@ def error_pagina(e):
 MARCO_TTL_S = 300          # cada cuánto se vuelve a pedir a PROCSIS
 MARCO_REINTENTO_S = 60     # si PROCSIS no respondió, cuánto esperar antes de reintentar
 _MARCO = {"ts": 0.0, "ttl": 0, "datos": None}
-_INFO = {"ts": 0.0, "ttl": 0, "datos": None}
+_INFO = {"ts": 0.0, "ttl": 0, "datos": None, "ttl_ok": 30}
 _ACCIONES = ("quienes", "planes")
 
 
@@ -1249,8 +1249,8 @@ def _marco_respaldo():
 
 def _marco_url(u):
     u = str(u or "").strip()
-    if u.rstrip("/") == "/pqr":
-        return "/pqr"                      # las PQR se radican desde esta misma app (y llegan a PROCSIS)
+    if u.rstrip("/") in ("/pqr", "/puntos-atencion"):
+        return u.rstrip("/")                      # las PQR se radican desde esta misma app (y llegan a PROCSIS)
     if u.startswith("/") and not u.startswith("//"):
         return (PROCSIS_URL + u) if PROCSIS_URL else "#"
     if re.match(r"^(https?://|mailto:|tel:)", u, re.I):
@@ -1314,7 +1314,7 @@ def _cache_procsis(c, ruta, limpiar, espera):
     cod, bruto = _procsis_api("GET", ruta, espera=espera) if (PROCSIS_URL and API_KEY) else (0, None)
     try:
         if cod == 200 and isinstance(bruto, dict) and bruto.get("ok", True):
-            c["datos"], c["ttl"] = limpiar(bruto), MARCO_TTL_S
+            c["datos"], c["ttl"] = limpiar(bruto), c.get("ttl_ok", MARCO_TTL_S)
         else:
             if c["datos"] is None:
                 c["datos"] = limpiar({})
@@ -1365,8 +1365,27 @@ def _pqr_catalogo():
     return [], [], 15
 
 
-@app.route("/pqr", methods=["GET", "POST"])
+# [tt-copia] ───────────────────────── PQR (diseño EduTrack), puntos de atención y cookies ─────────────────────────
+PA_HTML = '\n<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">\n<style>\n.sa{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#1d1d1f;background:#fff}\n.sa *{box-sizing:border-box}\n.sa-sec{padding:0 20px}\n.sa-hero{min-height:72vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:72px 20px;background:#fff}\n.sa-hero h1{margin:0 0 16px;font-size:clamp(34px,6.4vw,66px);line-height:1.05;font-weight:700;letter-spacing:-.03em;color:#000;max-width:860px}\n.sa-hero p{margin:0 0 30px;font-size:clamp(17px,2.4vw,24px);line-height:1.35;color:#6e6e73;max-width:640px;font-weight:400}\n.sa-cta,.sa-go{display:inline-flex;align-items:center;justify-content:center;border-radius:980px;background:#0020C2;color:#fff;font-weight:500;font-size:17px;\n  padding:13px 28px;text-decoration:none;cursor:pointer;user-select:none;-webkit-user-select:none;transition:background .2s ease,transform .12s ease,opacity .2s ease}\n.sa-cta:hover,.sa-go:hover{background:#0018A8}\n.sa-cta:active,.sa-go:active{transform:scale(.97)}\n.sa-cta:focus-visible,.sa-go:focus-visible,.sa-cat:focus-visible,.sa-item:focus-visible,.sa-gps:focus-visible{outline:3px solid rgba(0,32,194,.45);outline-offset:3px}\n.sa-find{background:#f5f5f7;padding:72px 20px 64px}\n.sa-wrap{max-width:900px;margin:0 auto}\n.sa-find h2{margin:0 0 8px;text-align:center;font-size:clamp(26px,4vw,40px);font-weight:700;letter-spacing:-.025em;color:#000}\n.sa-find .sa-lead{margin:0 0 28px;text-align:center;color:#6e6e73;font-size:17px}\n.sa-search{display:flex;align-items:center;gap:10px;background:#fff;border:1px solid #d2d2d7;border-radius:980px;padding:6px 8px 6px 20px;max-width:640px;margin:0 auto 26px;transition:border-color .2s,box-shadow .2s}\n.sa-search:focus-within{border-color:#0020C2;box-shadow:0 0 0 4px rgba(0,32,194,.15)}\n.sa-search svg{flex:0 0 auto;width:20px;height:20px;stroke:#86868b;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}\n.sa .sa-search input.sa-in{flex:1;min-width:0;border:0;outline:0;background:transparent;font:inherit;font-size:17px;color:#1d1d1f;padding:10px 0;box-shadow:none;margin:0;width:auto;border-radius:0}\n.sa-gps{flex:0 0 auto;width:42px;height:42px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;color:#1d1d1f;transition:background .2s}\n.sa-gps svg{stroke:currentColor}\n.sa-gps:hover{background:#f0f0f3}\n.sa-gps.on{color:#0020C2;background:rgba(0,32,194,.1)}\n.sa-cats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:28px}\n.sa-cat{background:#fff;border:1px solid #e0e0e5;border-radius:24px;aspect-ratio:1/1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:14px;\n  text-align:center;cursor:pointer;user-select:none;-webkit-user-select:none;transition:border-color .2s,background .2s,transform .15s,box-shadow .2s}\n.sa-cat svg{width:44px;height:44px;stroke:#1d1d1f;fill:none;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round}\n.sa-cat span{font-size:15px;font-weight:500;line-height:1.25;color:#1d1d1f}\n.sa-cat:hover{transform:translateY(-2px);box-shadow:0 10px 26px rgba(0,0,0,.07)}\n.sa-cat.on{border:1.5px solid #0020C2;background:#f5faff;box-shadow:0 0 0 3px rgba(0,32,194,.12)}\n.sa-cat.on svg{stroke:#0020C2}\n.sa-actions{display:flex;flex-direction:column;align-items:center;gap:12px}\n.sa-go{min-width:120px}\n.sa-go.is-off{background:#a9d1f7;pointer-events:none;cursor:default}\n.sa-msg{min-height:20px;text-align:center;font-size:14px;color:#6e6e73}\n.sa-res{display:none;background:#fff;padding:56px 20px 72px}\n.sa-res.show{display:block}\n.sa-res-head{max-width:1200px;margin:0 auto 18px;display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}\n.sa-res-head h3{margin:0;font-size:clamp(22px,3vw,30px);font-weight:700;letter-spacing:-.02em}\n.sa-res-head span{color:#6e6e73;font-size:15px}\n.sa-split{max-width:1200px;margin:0 auto;display:grid;grid-template-columns:minmax(300px,420px) 1fr;gap:20px;height:620px}\n.sa-list{overflow-y:auto;padding:2px 6px 2px 2px;display:flex;flex-direction:column;gap:12px;-webkit-overflow-scrolling:touch}\n.sa-item{background:#f5f5f7;border:1.5px solid transparent;border-radius:22px;padding:18px 18px 16px;cursor:pointer;transition:border-color .2s,background .2s}\n.sa-item:hover{background:#efeff2}\n.sa-item.on{border-color:#0020C2;background:#f5faff}\n.sa-item-t{font-size:17px;font-weight:600;letter-spacing:-.01em;color:#1d1d1f}\n.sa-item-a{margin-top:4px;font-size:14px;color:#6e6e73;line-height:1.4}\n.sa-item-s{margin-top:10px;font-size:14px;font-weight:500}\n.sa-item-s.open{color:#1a7f37}\n.sa-item-s.closed{color:#6e6e73}\n.sa-item-f{margin-top:14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}\n.sa-how{display:inline-flex;border-radius:980px;background:#0020C2;color:#fff!important;font-size:14px;font-weight:500;padding:9px 18px;text-decoration:none;transition:background .2s}\n.sa-how:hover{background:#0018A8}\n.sa-tel{font-size:14px;color:#0020C2;text-decoration:none}\n.sa-dist{margin-left:auto;font-size:13px;color:#6e6e73}\n.sa-mapbox{position:relative;border-radius:28px;overflow:hidden;border:1px solid rgba(255,255,255,.9);box-shadow:0 18px 50px rgba(0,0,0,.12),inset 0 1px 0 rgba(255,255,255,.9);background:#e9eef5}\n#sa-map{position:absolute;inset:0}\n.sa-chip{position:absolute;left:14px;top:14px;z-index:500;padding:8px 14px;border-radius:980px;font-size:13px;font-weight:500;color:#1d1d1f;\n  background:rgba(255,255,255,.7);-webkit-backdrop-filter:blur(18px) saturate(180%);backdrop-filter:blur(18px) saturate(180%);border:1px solid rgba(255,255,255,.9)}\n.sa-nomap{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:24px;color:#6e6e73;font-size:15px}\n.sa-empty{padding:28px 20px;border-radius:22px;background:#f5f5f7;color:#6e6e73;font-size:15px;line-height:1.5;text-align:center}\n.sa-pin span{display:block;width:22px;height:22px;border-radius:50%;background:#0020C2;border:3px solid #fff;box-shadow:0 3px 10px rgba(0,32,194,.55)}\n.sa-pin.on span{transform:scale(1.25);box-shadow:0 0 0 6px rgba(0,32,194,.25),0 3px 10px rgba(0,32,194,.55)}\n.leaflet-container{font-family:inherit}\n@media(max-width:900px){\n  .sa-cats{grid-template-columns:repeat(2,1fr)}\n  .sa-split{grid-template-columns:1fr;height:auto}\n  .sa-mapbox{order:-1;height:340px}\n  .sa-list{max-height:none;overflow:visible}\n}\n@media(prefers-reduced-motion:reduce){.sa *{transition:none!important}}\n/* ═══ Identidad EduTrack · Sedes y puntos de atención (una sola sección fluida) ═══ */\n:root{--et-green:#00E676;--et-cyan:#00B8D4;--et-blue:#0020C2;--et-navy:#0B1B4D;--et-grad:linear-gradient(100deg,var(--et-green) 0%,var(--et-cyan) 32%,var(--et-blue) 100%);--et-cyan-soft:rgba(0,184,212,.10);--et-cyan-line:rgba(0,184,212,.38);--et-shadow:0 18px 50px rgba(0,32,194,.14)}\n/* 1. Fusión: un solo fondo continuo entre el título y el buscador */\n.sa{background:#F8F9FA}\n.sa .sa-hero{background:transparent;min-height:0;padding:84px 20px 36px}\n.sa .sa-find{background:transparent;padding:12px 20px 72px}\n.sa .sa-res{background:transparent}\n.sa .sa-hero h1{color:var(--et-navy)}\n/* 2. Botón principal (Buscar una sede) y botón Ir */\n.sa .sa-cta,.sa .sa-go{background:var(--et-grad);color:#fff;font-weight:700;letter-spacing:.01em;text-shadow:0 1px 2px rgba(0,20,90,.4);box-shadow:0 8px 20px rgba(0,32,194,.22);transition:transform .2s ease,box-shadow .2s ease,filter .2s ease}\n.sa .sa-cta:hover,.sa .sa-go:hover{background:var(--et-grad);transform:translateY(-2px);box-shadow:0 14px 28px rgba(0,32,194,.30);filter:brightness(1.05) saturate(1.1)}\n.sa .sa-cta:active,.sa .sa-go:active{transform:translateY(0) scale(.98)}\n.sa .sa-cta:focus-visible,.sa .sa-go:focus-visible,.sa .sa-cat:focus-visible,.sa .sa-item:focus-visible,.sa .sa-gps:focus-visible{outline:3px solid rgba(0,184,212,.5);outline-offset:3px}\n/* 5. Botón inferior (Ir) cuando aún no hay categoría: contorno cian minimalista */\n.sa .sa-go.is-off{background:transparent;box-shadow:none;text-shadow:none;color:var(--et-cyan);border:1.5px solid var(--et-cyan-line)}\n.sa .sa-go.is-off:hover{transform:none;filter:none;box-shadow:none;background:transparent}\n/* 3. Tarjetas de categoría */\n.sa .sa-cat{background:rgba(255,255,255,.7);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);border:1px solid var(--et-cyan-line);box-shadow:0 4px 14px rgba(0,32,194,.05)}\n.sa .sa-cat svg{stroke:var(--et-blue);transition:stroke .2s}\n.sa .sa-cat span{color:var(--et-navy)}\n.sa .sa-cat:hover{transform:translateY(-3px);border-color:transparent;background:linear-gradient(#fff,#fff) padding-box,var(--et-grad) border-box;box-shadow:0 14px 32px rgba(0,32,194,.16)}\n.sa .sa-cat:hover svg{stroke:var(--et-cyan)}\n.sa .sa-cat.on{border:1.5px solid transparent;background:linear-gradient(#F1FBFF,#F1FBFF) padding-box,var(--et-grad) border-box;box-shadow:0 0 0 4px rgba(0,184,212,.14),0 14px 32px rgba(0,32,194,.14)}\n.sa .sa-cat.on svg{stroke:var(--et-cyan)}\n/* 4. Barra de búsqueda: sombra difuminada, lupa y ubicación en cian */\n.sa .sa-search{background:#fff;border:1px solid transparent;box-shadow:0 8px 30px rgba(0,32,194,.10)}\n.sa .sa-search:focus-within{border-color:transparent;box-shadow:0 10px 34px rgba(0,184,212,.22),0 0 0 3px rgba(0,184,212,.28)}\n.sa .sa-search svg{stroke:var(--et-cyan)}\n.sa .sa-gps{color:var(--et-cyan)}\n.sa .sa-gps:hover{background:var(--et-cyan-soft)}\n.sa .sa-gps.on{color:var(--et-blue);background:var(--et-cyan-soft)}\n.sa .sa-search .sa-gps svg{stroke:currentColor}\n/* Resultados */\n.sa .sa-item{background:rgba(255,255,255,.78);border:1.5px solid var(--et-cyan-line)}\n.sa .sa-item:hover{background:#fff;border-color:var(--et-cyan)}\n.sa .sa-item.on{border-color:var(--et-cyan);background:#F1FBFF}\n.sa .sa-how{background:var(--et-grad);text-shadow:0 1px 2px rgba(0,20,90,.35)}\n.sa .sa-how:hover{background:var(--et-grad);filter:brightness(1.05)}\n.sa .sa-tel{color:var(--et-blue)}\n.sa .sa-mapbox{box-shadow:var(--et-shadow)}\n@media(prefers-reduced-motion:reduce){.sa .sa-cta:hover,.sa .sa-go:hover,.sa .sa-cat:hover{transform:none}}\n</style>\n\n<div class="sa">\n  <section class="sa-hero" id="sa-inicio">\n    <h1>Hay una sede de PROCSIS cerca de ti</h1>\n    <p>Encuentra soporte técnico, atención administrativa o campus autorizados.</p>\n    <a class="sa-cta" id="sa-cta" role="button" tabindex="0" href="#sa-buscar">Buscar una sede</a>\n  </section>\n\n  <section class="sa-find" id="sa-buscar">\n    <div class="sa-wrap">\n      <h2>¿Qué estás buscando?</h2>\n      <p class="sa-lead">Escribe tu ciudad o código postal, o usa tu ubicación.</p>\n      <div class="sa-search">\n        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>\n        <input class="sa-in" id="sa-q" type="text" inputmode="search" autocomplete="off" placeholder="Ciudad o código postal" aria-label="Ciudad o código postal">\n        <span class="sa-gps" id="sa-gps" role="button" tabindex="0" aria-label="Usar mi ubicación" title="Usar mi ubicación">\n          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 3.5 3.5 10.8l6.7 2.5 2.5 6.7z"/></svg>\n        </span>\n      </div>\n      <div class="sa-cats" role="radiogroup" aria-label="Tipo de punto de atención">\n        <div class="sa-cat" role="radio" aria-checked="false" tabindex="0" data-cat="sedes">\n          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 21V4.5A1.5 1.5 0 0 1 5.5 3h8A1.5 1.5 0 0 1 15 4.5V21"/><path d="M15 9h3.5a1.5 1.5 0 0 1 1.5 1.5V21"/><path d="M3 21h18"/><path d="M8 7.5h3M8 11h3M8 14.5h3"/></svg>\n          <span>Sedes y Campus</span>\n        </div>\n        <div class="sa-cat" role="radio" aria-checked="false" tabindex="0" data-cat="soporte">\n          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 14v-2a8 8 0 0 1 16 0v2"/><rect x="3" y="14" width="4" height="6" rx="1.5"/><rect x="17" y="14" width="4" height="6" rx="1.5"/><path d="M19 20c0 1.3-2 2-5 2"/></svg>\n          <span>Soporte Técnico</span>\n        </div>\n        <div class="sa-cat" role="radio" aria-checked="false" tabindex="0" data-cat="administrativa">\n          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7.5A1.5 1.5 0 0 0 6 4.5v15A1.5 1.5 0 0 0 7.5 21h9a1.5 1.5 0 0 0 1.5-1.5V7z"/><path d="M14 3v4h4"/><path d="M9 12h6M9 15.5h6"/></svg>\n          <span>Atención Administrativa</span>\n        </div>\n        <div class="sa-cat" role="radio" aria-checked="false" tabindex="0" data-cat="seguridad">\n          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7.5 3v5.5c0 4.5-3.1 8.2-7.5 9.5-4.4-1.3-7.5-5-7.5-9.5V6z"/><path d="M9 12l2.2 2.2L15.5 10"/></svg>\n          <span>Puntos de Seguridad</span>\n        </div>\n      </div>\n      <div class="sa-actions">\n        <a class="sa-go is-off" id="sa-go" role="button" tabindex="0" aria-disabled="true">Ir</a>\n        <div class="sa-msg" id="sa-msg" aria-live="polite"></div>\n      </div>\n    </div>\n  </section>\n\n  <section class="sa-res" id="sa-resultados">\n    <div class="sa-res-head"><h3 id="sa-res-t">Resultados</h3><span id="sa-res-n"></span></div>\n    <div class="sa-split">\n      <div class="sa-list" id="sa-list"></div>\n      <div class="sa-mapbox"><div class="sa-chip" id="sa-chip">Mapa</div><div id="sa-map"></div></div>\n    </div>\n  </section>\n</div>\n\n<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>\n<script>\n(function(){\nvar DATA=__DATA__;\nvar CATN={sedes:"Sedes y Campus",soporte:"Soporte Técnico",administrativa:"Atención Administrativa",seguridad:"Puntos de Seguridad"};\nvar DIAS=["","L","M","X","J","V","S","D"];\nvar st={cat:null,pos:null,map:null,layer:null,markers:[]};\nvar reduce=window.matchMedia&&matchMedia("(prefers-reduced-motion: reduce)").matches;\nfunction $(i){return document.getElementById(i);}\nfunction esc(s){return String(s==null?"":s).replace(/[&<>"\']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",\'"\':"&quot;","\'":"&#39;"}[c];});}\nfunction norm(s){return String(s||"").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g,"");}\nfunction goTo(id){var e=$(id);if(e)e.scrollIntoView({behavior:reduce?"auto":"smooth",block:"start"});}\nfunction onAct(el,fn){el.addEventListener("click",fn);el.addEventListener("keydown",function(ev){if(ev.key==="Enter"||ev.key===" "){ev.preventDefault();fn(ev);}});}\nfunction msg(t){$("sa-msg").textContent=t||"";}\n\n/* Paso 1 -> 2 */\n$("sa-cta").addEventListener("click",function(ev){ev.preventDefault();goTo("sa-buscar");setTimeout(function(){try{$("sa-q").focus({preventScroll:true});}catch(e){}},600);});\n\n/* Paso 2: categorias */\nvar cats=[].slice.call(document.querySelectorAll(".sa-cat"));\nfunction pick(c){\n  st.cat=c.getAttribute("data-cat");\n  cats.forEach(function(x){var on=(x===c);x.classList.toggle("on",on);x.setAttribute("aria-checked",on?"true":"false");});\n  var go=$("sa-go");go.classList.remove("is-off");go.setAttribute("aria-disabled","false");msg("");\n}\ncats.forEach(function(c){onAct(c,function(){pick(c);});});\n\n/* GPS */\nonAct($("sa-gps"),function(){\n  if(!navigator.geolocation){msg("Tu navegador no permite detectar la ubicación. Escribe tu ciudad.");return;}\n  msg("Detectando tu ubicación…");\n  navigator.geolocation.getCurrentPosition(function(p){\n    st.pos={lat:p.coords.latitude,lng:p.coords.longitude};\n    $("sa-q").value="";$("sa-q").placeholder="Usando tu ubicación actual";$("sa-gps").classList.add("on");\n    msg(st.cat?"Ubicación lista. Toca Ir.":"Ubicación lista. Elige un tipo de punto y toca Ir.");\n  },function(){msg("No pudimos obtener tu ubicación. Escribe tu ciudad o código postal.");},{timeout:10000,maximumAge:300000});\n});\n$("sa-q").addEventListener("input",function(){if(st.pos){st.pos=null;$("sa-gps").classList.remove("on");$("sa-q").placeholder="Ciudad o código postal";}});\n$("sa-q").addEventListener("keydown",function(ev){if(ev.key==="Enter"){ev.preventDefault();run();}});\nonAct($("sa-go"),function(){run();});\n\n/* Utilidades */\nfunction dist(a,b){var R=6371,r=Math.PI/180,dl=(b.lat-a.lat)*r,dg=(b.lng-a.lng)*r;\n  var x=Math.sin(dl/2)*Math.sin(dl/2)+Math.cos(a.lat*r)*Math.cos(b.lat*r)*Math.sin(dg/2)*Math.sin(dg/2);return 2*R*Math.asin(Math.sqrt(x));}\nfunction hm(s){var a=String(s||"").split(":");return (parseInt(a[0],10)||0)*60+(parseInt(a[1],10)||0);}\nfunction fmt(s){var m=hm(s),h=Math.floor(m/60),mm=m%60;return (h%12||12)+":"+(mm<10?"0":"")+mm+" "+(h>=12?"p. m.":"a. m.");}\nfunction bogota(){var o={};new Intl.DateTimeFormat("en-US",{timeZone:"America/Bogota",weekday:"short",hour:"2-digit",minute:"2-digit",hour12:false}).formatToParts(new Date()).forEach(function(x){o[x.type]=x.value;});\n  var d={Mon:1,Tue:2,Wed:3,Thu:4,Fri:5,Sat:6,Sun:7}[o.weekday];return {d:d,m:(parseInt(o.hour,10)%24)*60+(parseInt(o.minute,10)||0)};}\nfunction diasTxt(p){var a=String(p.dias||"").split(",").map(Number).filter(Boolean).sort();if(!a.length)return "";\n  var cont=a.every(function(v,i){return i===0||v===a[i-1]+1;});\n  return cont&&a.length>1?DIAS[a[0]]+"–"+DIAS[a[a.length-1]]:a.map(function(v){return DIAS[v];}).join(", ");}\nfunction estado(p){var n=bogota(),dias=String(p.dias||"").split(",").map(Number);\n  var open=dias.indexOf(n.d)>=0&&n.m>=hm(p.abre)&&n.m<hm(p.cierra);\n  return open?{ok:true,t:"Abierto · cierra "+fmt(p.cierra)}:{ok:false,t:"Cerrado · "+diasTxt(p)+" "+fmt(p.abre)+" – "+fmt(p.cierra)};}\nfunction como(p){var q=(p.lat!=null&&p.lng!=null)?(p.lat+","+p.lng):encodeURIComponent((p.direccion||"")+" "+(p.ciudad||""));\n  return "https://www.google.com/maps/dir/?api=1&destination="+q;}\n\n/* Paso 3: resultados */\nfunction run(){\n  if(!st.cat){msg("Elige primero un tipo de punto de atención.");return;}\n  var q=norm($("sa-q").value).trim();\n  var list=DATA.filter(function(p){return p.categoria===st.cat;});\n  if(q)list=list.filter(function(p){return norm([p.nombre,p.direccion,p.ciudad,p.codigo_postal].join(" ")).indexOf(q)>=0;});\n  list.forEach(function(p){p._d=(st.pos&&p.lat!=null&&p.lng!=null)?dist(st.pos,p):null;});\n  if(st.pos)list.sort(function(a,b){return (a._d==null?1e9:a._d)-(b._d==null?1e9:b._d);});\n  render(list,q);\n  $("sa-resultados").classList.add("show");\n  setTimeout(function(){ensureMap();drawMap(list);goTo("sa-resultados");},60);\n}\nfunction render(list,q){\n  $("sa-res-t").textContent=CATN[st.cat]||"Resultados";\n  $("sa-res-n").textContent=list.length+(list.length===1?" punto encontrado":" puntos encontrados");\n  $("sa-chip").textContent=list.length+(list.length===1?" ubicación":" ubicaciones");\n  var box=$("sa-list");\n  if(!list.length){\n    box.innerHTML=\'<div class="sa-empty">\'+(DATA.length?"No encontramos puntos de este tipo"+(q?" para «"+esc($("sa-q").value)+"»":"")+". Prueba con otra ciudad, otro código postal o usa tu ubicación.":"Aún no hay puntos de atención publicados. Muy pronto los verás aquí.")+\'</div>\';\n    return;\n  }\n  box.innerHTML=list.map(function(p,i){\n    var e=estado(p);\n    return \'<div class="sa-item" role="button" tabindex="0" data-i="\'+i+\'">\'\n      +\'<div class="sa-item-t">\'+esc(p.nombre)+\'</div>\'\n      +\'<div class="sa-item-a">\'+esc(p.direccion)+(p.ciudad?(p.direccion?" · ":"")+esc(p.ciudad):"")+(p.codigo_postal?" · "+esc(p.codigo_postal):"")+\'</div>\'\n      +\'<div class="sa-item-s \'+(e.ok?"open":"closed")+\'">\'+esc(e.t)+\'</div>\'\n      +\'<div class="sa-item-f"><a class="sa-how" href="\'+como(p)+\'" target="_blank" rel="noopener">Cómo llegar</a>\'\n      +(p.telefono?\'<a class="sa-tel" href="tel:\'+esc(String(p.telefono).replace(/[^0-9+]/g,""))+\'">\'+esc(p.telefono)+\'</a>\':"")\n      +(p._d!=null?\'<span class="sa-dist">\'+(p._d<10?p._d.toFixed(1):Math.round(p._d))+\' km</span>\':"")\n      +\'</div></div>\';\n  }).join("");\n  st.list=list;\n  [].slice.call(box.querySelectorAll(".sa-item")).forEach(function(el){\n    onAct(el,function(ev){if(ev&&ev.target&&ev.target.closest&&ev.target.closest("a"))return;focusItem(parseInt(el.getAttribute("data-i"),10),true);});\n  });\n}\nfunction ensureMap(){\n  var m=$("sa-map");\n  if(!window.L){m.innerHTML=\'<div class="sa-nomap">El mapa no está disponible en este momento. Usa «Cómo llegar» en cada punto.</div>\';return;}\n  if(st.map)return;\n  st.map=L.map("sa-map",{scrollWheelZoom:false,zoomControl:true}).setView([4.6,-74.08],6);\n  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,attribution:"&copy; OpenStreetMap"}).addTo(st.map);\n  st.layer=L.layerGroup().addTo(st.map);\n}\nfunction drawMap(list){\n  if(!st.map)return;\n  st.map.invalidateSize();st.layer.clearLayers();st.markers=[];\n  var pts=[];\n  list.forEach(function(p,i){\n    if(p.lat==null||p.lng==null){st.markers[i]=null;return;}\n    var mk=L.marker([p.lat,p.lng],{icon:L.divIcon({className:"sa-pin",html:"<span></span>",iconSize:[22,22],iconAnchor:[11,11],popupAnchor:[0,-12]})})\n      .bindPopup("<b>"+esc(p.nombre)+"</b><br>"+esc(p.direccion||""));\n    mk.on("click",function(){focusItem(i,false);});\n    mk.addTo(st.layer);st.markers[i]=mk;pts.push([p.lat,p.lng]);\n  });\n  if(st.pos)pts.push([st.pos.lat,st.pos.lng]);\n  if(pts.length>1)st.map.fitBounds(pts,{padding:[50,50],maxZoom:15});\n  else if(pts.length===1)st.map.setView(pts[0],15);\n}\nfunction focusItem(i,fromList){\n  var items=[].slice.call(document.querySelectorAll(".sa-item"));\n  items.forEach(function(el,k){el.classList.toggle("on",k===i);});\n  if(!fromList&&items[i])items[i].scrollIntoView({block:"nearest",behavior:reduce?"auto":"smooth"});\n  st.markers.forEach(function(m,k){if(m&&m._icon)m._icon.classList.toggle("on",k===i);});\n  var mk=st.markers[i];\n  if(fromList&&mk&&st.map){st.map.setView(mk.getLatLng(),Math.max(st.map.getZoom(),14),{animate:!reduce});mk.openPopup();}\n}\n})();\n</script>\n'
+COOKIES_HTML = '\n<style>#cookie-banner #cookie-accept-all,#cookie-banner #cookie-save-cfg{background:#0020C2!important;border:0!important;box-shadow:0 4px 14px rgba(0,32,194,.32)!important;color:#fff!important}#cookie-banner #cookie-accept-all:hover,#cookie-banner #cookie-save-cfg:hover{background:#0018A8!important}#cookie-banner #cookie-reject{background:#fff!important;color:#0020C2!important;border:1.5px solid #0020C2!important;box-shadow:none!important}#cookie-banner #cookie-config{background:transparent!important;color:#0020C2!important;border:0!important;box-shadow:none!important}</style>\n<div id="cookie-banner" style="display:none;position:fixed;bottom:0;left:0;right:0;z-index:99999;padding:12px 12px calc(12px + env(safe-area-inset-bottom,0px));box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,Helvetica,Arial,sans-serif;-webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px);background:rgba(245,245,247,.42)">\n  <div style="max-width:560px;margin:0 auto;background:rgba(255,255,255,.92);-webkit-backdrop-filter:blur(24px);backdrop-filter:blur(24px);border-radius:20px;box-shadow:0 8px 32px rgba(0,32,194,.22);padding:18px 16px 16px;border:1px solid rgba(255,255,255,.65);box-sizing:border-box">\n    <h2 style="margin:0 0 8px;font-size:clamp(16px,4.2vw,19px);color:#1d1d1f;font-weight:800;letter-spacing:-.02em;line-height:1.25">Usamos cookies para mejorar tu experiencia</h2>\n    <p style="margin:0 0 14px;font-size:13px;line-height:1.5;color:#334155;word-wrap:break-word;overflow-wrap:anywhere">\n      Usamos cookies propias y técnicas para acceso seguro, sesión, estadísticas básicas y el funcionamiento del sitio.\n      <b>No usamos cookies de publicidad de terceros.</b>\n      Al continuar o aceptar, autorizas esta utilización.\n      Más info:\n      <a href="__PROCSIS__/cookies" style="color:#0020C2;font-weight:700;text-decoration:underline">política de cookies</a>,\n      <a href="__PROCSIS__/tratamiento-datos" style="color:#0020C2;font-weight:700;text-decoration:underline">tratamiento de datos</a>\n      y\n      <a href="__PROCSIS__/reembolsos" style="color:#0020C2;font-weight:700;text-decoration:underline">política de reembolsos</a>.\n    </p>\n    <div id="cookie-config-panel" style="display:none;background:rgba(239,246,255,.9);border:1px solid #bfdbfe;border-radius:14px;padding:12px;margin-bottom:12px;font-size:13px;color:#1e3a5f">\n      <label style="display:flex;gap:8px;align-items:flex-start;margin:8px 0;line-height:1.35"><input type="checkbox" checked disabled style="width:18px;height:18px;flex-shrink:0;margin-top:2px"> Cookies esenciales (sesión / seguridad) — siempre activas</label>\n      <label style="display:flex;gap:8px;align-items:flex-start;margin:8px 0;line-height:1.35"><input type="checkbox" id="ck-pref" checked style="width:18px;height:18px;flex-shrink:0;margin-top:2px"> Preferencias de interfaz</label>\n      <label style="display:flex;gap:8px;align-items:flex-start;margin:8px 0;line-height:1.35"><input type="checkbox" id="ck-stat" style="width:18px;height:18px;flex-shrink:0;margin-top:2px"> Estadística anónima de uso</label>\n      <button type="button" id="cookie-save-cfg" style="margin-top:8px;width:100%;background:#0020C2;color:#fff;border:0;border-radius:12px;padding:11px 14px;font-weight:700;cursor:pointer;font-size:14px">Guardar preferencias</button>\n    </div>\n    <div style="display:flex;flex-direction:column;gap:8px">\n      <button type="button" id="cookie-accept-all" style="width:100%;background:#0020C2;color:#fff;border:0;border-radius:14px;padding:13px 16px;font-weight:800;cursor:pointer;font-size:15px;box-shadow:0 4px 14px rgba(11,99,206,.35)">Aceptar todas las cookies</button>\n      <button type="button" id="cookie-reject" style="width:100%;background:#fff;color:#0020C2;border:1.5px solid #93c5fd;border-radius:14px;padding:12px 16px;font-weight:700;cursor:pointer;font-size:14px">Rechazar cookies no esenciales</button>\n      <button type="button" id="cookie-config" style="width:100%;background:transparent;color:#0020C2;border:0;border-radius:14px;padding:10px 16px;font-weight:700;cursor:pointer;font-size:14px">Configurar cookies</button>\n    </div>\n  </div>\n</div>\n<script>\n(function(){\n  try {\n    var KEY = \'tiendatrack_cookies_pref\';\n    if (!localStorage.getItem(KEY)) {\n      var b = document.getElementById(\'cookie-banner\');\n      if (b) b.style.display = \'block\';\n    }\n    function save(pref) {\n      localStorage.setItem(KEY, JSON.stringify(pref));\n      localStorage.setItem(\'tiendatrack_cookies_ok\', \'1\');\n      var b = document.getElementById(\'cookie-banner\');\n      if (b) b.style.display = \'none\';\n    }\n    var a = document.getElementById(\'cookie-accept-all\');\n    if (a) a.onclick = function(){ save({essential:true, pref:true, stat:true, all:true}); };\n    var r = document.getElementById(\'cookie-reject\');\n    if (r) r.onclick = function(){ save({essential:true, pref:false, stat:false, all:false}); };\n    var c = document.getElementById(\'cookie-config\');\n    if (c) c.onclick = function(){\n      var p = document.getElementById(\'cookie-config-panel\');\n      if (p) p.style.display = p.style.display === \'none\' ? \'block\' : \'none\';\n    };\n    var s = document.getElementById(\'cookie-save-cfg\');\n    if (s) s.onclick = function(){\n      var pref = document.getElementById(\'ck-pref\');\n      var st = document.getElementById(\'ck-stat\');\n      save({essential:true, pref: !!(pref && pref.checked), stat: !!(st && st.checked), all:false});\n    };\n  } catch(e) {}\n})();\n</script>\n<style>@media print{#cookie-banner{display:none!important}}</style>\n'
+
+
+def _pqr_catalogo(espera=8):
+    cod, r = _procsis_api("GET", "/pqr/catalogo", espera=espera)
+    if cod == 200 and r.get("ok"):
+        return r.get("tipos") or [], r.get("categorias") or [], int(r.get("dias_habiles_respuesta") or 15)
+    return [], [], 15
+
+
+@app.route("/pqr")
 def pqr():
+    # portada pública, igual a la de EduTrack; presentar y consultar piden iniciar sesión porque la PQR queda ligada a la cuenta
+    _t, _c, dias = _pqr_catalogo(3)
+    return render_template("pqr.html", dias=dias)
+
+
+@app.route("/pqr/crear", methods=["GET", "POST"])
+def pqr_crear():
     email = session.get("email", "")
     tipos, cats, dias = _pqr_catalogo()
     error, f = None, {"tipo": "", "categoria": "", "asunto": "", "descripcion": ""}
@@ -1378,9 +1397,19 @@ def pqr():
         if cod in (200, 201) and r.get("ok"):
             return redirect(url_for("pqr_detalle", radicado=r.get("radicado"), nuevo=1))
         error = r.get("error") or "No pudimos radicar tu solicitud. Intenta de nuevo."
+    return render_template("pqr_crear.html", tipos=tipos, cats=cats, dias=dias, error=error, f=f, ref=secrets.token_hex(8), sin_servicio=(not tipos))
+
+
+@app.route("/pqr/consulta", methods=["GET", "POST"])
+def pqr_consulta():
+    email = session.get("email", "")
+    if request.method == "POST":
+        rad = re.sub(r"\D", "", request.form.get("radicado") or "")[:30]
+        if rad:
+            return redirect(url_for("pqr_detalle", radicado=rad))
     cod, lst = _procsis_api("GET", "/pqr", params={"email": email})
     casos = lst.get("pqr", []) if (cod == 200 and lst.get("ok")) else []
-    return render_template("pqr.html", tipos=tipos, cats=cats, dias=dias, error=error, f=f, casos=casos, ref=secrets.token_hex(8), sin_servicio=(not tipos))
+    return render_template("pqr_consulta.html", casos=casos, sin_servicio=(cod != 200))
 
 
 @app.route("/pqr/<radicado>", methods=["GET", "POST"])
@@ -1400,6 +1429,28 @@ def pqr_detalle(radicado):
     if request.args.get("nuevo") and not aviso:
         aviso = "Radicamos tu solicitud. Guarda tu número de radicado."
     return render_template("pqr_detalle.html", p=r["pqr"], error=error, aviso=aviso)
+
+
+@app.route("/puntos-atencion")
+def puntos_atencion():
+    # la página de EduTrack con las sedes que Gerencia administra en PROCSIS
+    cod, r = _procsis_api("GET", "/puntos", espera=4)
+    datos = r.get("puntos", []) if (cod == 200 and r.get("ok")) else []
+    data_js = json.dumps(datos, ensure_ascii=False).replace("</", "<\\/")
+    return render_template("puntos.html", pagina=PA_HTML.replace("__DATA__", data_js))
+
+
+@app.after_request
+def _inyectar_cookies(r):
+    # el aviso de cookies sale en todas las páginas HTML, como en EduTrack, hasta que la persona elige
+    try:
+        if r.mimetype == "text/html" and r.status_code == 200 and not r.direct_passthrough and request.endpoint != "static":
+            t = r.get_data(as_text=True)
+            if "cookie-banner" not in t and "</body>" in t:
+                r.set_data(t.replace("</body>", COOKIES_HTML.replace("__PROCSIS__", PROCSIS_URL) + "</body>", 1))
+    except Exception:
+        pass
+    return r
 
 
 app.add_template_filter(_cop, "cop")
@@ -1668,7 +1719,7 @@ select.campo{appearance:none;-webkit-appearance:none;background-image:linear-gra
 </footer>
 ''',
     'marco_ventanas.html': r'''<style>
-.ven{border:0;padding:0;border-radius:24px;width:min(94vw,820px);max-height:88vh;background:#fff;color:#0b1437;box-shadow:0 30px 90px rgba(10,42,143,.35);font-family:inherit}
+.ven{border:0;padding:0;border-radius:24px;width:min(94vw,1000px);max-height:88vh;background:#fff;color:#0b1437;box-shadow:0 30px 90px rgba(10,42,143,.35);font-family:inherit}
 .ven::backdrop{background:rgba(8,18,60,.55);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
 .ven-in{padding:clamp(22px,4vw,36px);overflow:auto;max-height:88vh}
 .ven h2{margin:0 0 6px;font-size:clamp(22px,3.4vw,30px);letter-spacing:-.02em;color:#0a2a8f}
@@ -1679,12 +1730,17 @@ select.campo{appearance:none;-webkit-appearance:none;background-image:linear-gra
 .ven .cta{display:inline-block;padding:12px 20px;border-radius:999px;background:linear-gradient(135deg,#0a2a8f,#1747d6 55%,#12b5ff);color:#fff;font-weight:700;text-decoration:none;font-size:15px;margin:4px 8px 4px 0}
 .ven .cta.sec{background:#eef3ff;color:#0a2a8f}
 .ven .cta.off{background:#e5e8f2;color:#6b7aa3}
-.ven-planes{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:6px 0 14px}
-.ven-plan{border:1px solid rgba(10,42,143,.14);border-radius:18px;padding:18px;background:linear-gradient(180deg,#fff,#f4f8ff)}
-.ven-plan h3{margin:0 0 4px;font-size:18px}
-.ven-plan p{margin:0 0 8px;font-size:13.5px;color:#4b5b86}
-.ven-plan .pr{font-size:26px;font-weight:800;color:#0a2a8f;letter-spacing:-.02em}.ven-plan .pr small{font-size:13px;font-weight:600;color:#4b5b86}
-.ven-plan ul{margin:10px 0 0;padding-left:18px;font-size:13.5px;line-height:1.6}
+.ven .lv-plans{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:18px;margin:6px 0 16px}
+.ven .pl-card{background:#f5f5f7;border:0;border-radius:20px;padding:22px 18px;box-shadow:0 4px 30px rgba(0,0,0,.02);position:relative;display:flex;flex-direction:column}
+.ven .pl-badge{position:absolute;top:14px;right:14px;background:#0020C2;color:#fff;font-size:10px;font-weight:600;padding:4px 10px;border-radius:980px}
+.ven .pl-card h3{margin:0 0 8px;font-size:20px;color:#1d1d1f;font-weight:700;padding-right:70px}
+.ven .pl-line{font-size:12px;color:#86868b;margin-bottom:8px}
+.ven .pl-price{font-size:18px;font-weight:600;margin-bottom:6px;color:#1d1d1f}
+.ven .pl-price small{font-size:12px;font-weight:400;color:#86868b}
+.ven .pl-card ul{margin:0 0 16px;padding-left:18px;color:#6e6e73;font-size:13px;line-height:1.55;flex:1;list-style:disc}
+.ven .pl-cta{display:block;text-align:center;background:#0020C2;color:#fff;padding:11px 16px;border-radius:980px;font-weight:500;text-decoration:none;font-size:13px;margin-top:auto}
+.ven .pl-cta:hover{background:#0018A8}
+.ven .pl-view{font-size:12px;color:#86868b;margin-top:auto}
 .ven small.nota{display:block;color:#6b7aa3;font-size:12.5px;margin-top:8px}
 </style>
 <dialog class="ven" id="ven-quienes" aria-labelledby="vq-t">
@@ -1705,14 +1761,17 @@ select.campo{appearance:none;-webkit-appearance:none;background-image:linear-gra
     <h2 id="vp-t">Planes y demo gratis</h2>
     <p class="ven-sub">Empieza con una demo de {{ info.demo.dias }} días y paga solo si te sirve.</p>
     {% if info.planes %}
-    <div class="ven-planes">
+    <div class="lv-plans">
       {% for p in info.planes %}
-      <div class="ven-plan">
-        <h3>{{ p.nombre }}</h3>{% if p.descripcion %}<p>{{ p.descripcion }}</p>{% endif %}
-        <div class="pr">{{ p.mensual | cop }} <small>/ mes</small></div>
-        {% if p.anual %}<p>o {{ p.anual | cop }} al año</p>{% endif %}
-        <ul><li>Hasta {{ p.sucursales }} sucursal(es) y {{ p.usuarios }} usuario(s)</li><li>Hasta {{ p.productos | cop_n }} productos</li><li>Facturación DIAN: {{ p.dian }}</li></ul>
-      </div>
+      <article class="pl-card">
+        <div class="pl-badge">{{ 'PRUEBA' if not p.mensual else 'PLAN' }}</div>
+        <h3>{{ p.nombre }}</h3>
+        <div class="pl-line">TiendaTrack{% if p.descripcion %} · {{ p.descripcion }}{% endif %}</div>
+        <div class="pl-price">{% if p.mensual %}{{ p.mensual | cop }} <small>/ mes</small>{% else %}Consultar precio{% endif %}</div>
+        {% if p.anual %}<div class="pl-line">o {{ p.anual | cop }} al año</div>{% endif %}
+        <ul><li>Hasta {{ p.sucursales }} sucursal(es)</li><li>Hasta {{ p.usuarios }} usuario(s)</li><li>Hasta {{ p.productos | cop_n }} productos</li><li>Facturación DIAN: {{ p.dian }}</li></ul>
+        {% if info.demo.abierto and info.demo.url != '#' %}<a class="pl-cta" href="{{ info.demo.url }}" target="_blank" rel="noopener">Probar {{ info.demo.dias }} días gratis</a>{% else %}<div class="pl-view">Solo consulta · Sin activación en línea</div>{% endif %}
+      </article>
       {% endfor %}
     </div>
     {% else %}<p class="txt">Los planes se muestran aquí en cuanto PROCSIS los publique.</p>{% endif %}
@@ -1731,67 +1790,153 @@ select.campo{appearance:none;-webkit-appearance:none;background-image:linear-gra
 })();
 </script>
 ''',
-    'pqr.html': r'''{% extends "publico_base.html" %}
-{% block titulo %}PQRSD{% endblock %}
-{% block nav %}<a class="vidrio" href="/">Volver a mi negocio</a>{% endblock %}
-{% block hero %}{% endblock %}
-{% block tarjeta %}
-<style>main{grid-template-columns:minmax(0,1fr)!important}.tarjeta{max-width:900px!important}textarea.campo{min-height:140px;resize:vertical}
-.pq-caso{display:flex;flex-wrap:wrap;gap:6px 16px;justify-content:space-between;align-items:center;padding:13px 16px;margin:0 0 10px;border:1px solid rgba(10,42,143,.14);border-radius:16px;background:rgba(255,255,255,.7);text-decoration:none;color:inherit}
-.pq-caso b{color:#0a2a8f}.pq-caso small{color:#4b5b86}
-.pq-est{padding:4px 12px;border-radius:999px;font-size:12.5px;font-weight:700;background:#e0f2ff;color:#0b4a8f}.pq-est.cerrado{background:#dcfae6;color:#067647}
-h3.pq-h{margin:26px 0 12px;font-size:18px;color:#0a2a8f}</style>
-<h2>Peticiones, quejas, reclamos y sugerencias</h2>
-<p class="sub">Tu solicitud se radica en PROCSIS y llega al área de Soluciones. Te respondemos en {{ dias }} días hábiles.</p>
-{% if error %}<div class="aviso err" role="alert">{{ error }}</div>{% endif %}
-{% if sin_servicio %}<div class="aviso info">El servicio de PQR no responde en este momento. Intenta de nuevo en un minuto.</div>{% endif %}
-<form method="post" action="{{ url_for('pqr') }}">
+    'pqr_base.html': r'''<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{% block titulo %}Gestión PQR OnLine{% endblock %} · TiendaTrack</title>
+<style>
+html,body{margin:0;min-height:100vh;background:#eef2f7;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:#334155}
+.fondo-corporativo-light{background:radial-gradient(circle at 12% 18%,rgba(0,32,194,.10),transparent 38%),radial-gradient(circle at 88% 82%,rgba(0,169,224,.12),transparent 40%),linear-gradient(135deg,#eef2f7 0%,#f8fafc 100%);min-height:100vh;display:flex;flex-direction:column;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.navbar-light-glass{background:rgba(255,255,255,.8);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);border-bottom:1px solid rgba(226,232,240,.8);color:#0f172a;position:sticky;top:0;z-index:5}
+.top{padding:14px 20px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}
+.top h1{margin:0;font-size:18px;font-weight:800;color:#0f172a}
+.top a{color:#0020C2;text-decoration:none;font-size:13px;font-weight:600}
+.top a:hover{text-decoration:underline}
+.centro-pqr{flex:1;display:flex;justify-content:center;align-items:center;padding:32px 16px}
+.tarjeta-corporativa-white{width:100%;max-width:560px;box-sizing:border-box;background:rgba(255,255,255,.65);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,.7);border-radius:20px;box-shadow:0 10px 30px rgba(148,163,184,.12);color:#334155;padding:40px;text-align:center}
+@supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){.tarjeta-corporativa-white{background:rgba(255,255,255,.95)}}
+.titulo-header-glass{background:rgba(241,245,249,.7);border-bottom:1px solid #e2e8f0;padding:16px;margin:-40px -40px 30px -40px;border-top-left-radius:20px;border-top-right-radius:20px;font-weight:700;font-size:15px;text-transform:uppercase;letter-spacing:.5px;color:#0f172a}
+.texto-intro-pqr{margin:0 0 22px;font-size:16px;line-height:1.5;color:#334155}
+.btn-row{display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
+.btn-presentar-light,.btn-consultar-light{display:inline-block;min-width:170px;box-sizing:border-box;text-align:center;text-decoration:none;border-radius:10px;padding:14px 28px;font-weight:600;font-size:15px;transition:all .2s ease;cursor:pointer}
+.btn-presentar-light{background:#0020C2;color:#fff;border:none;box-shadow:0 4px 14px rgba(0,32,194,.25)}
+.btn-presentar-light:hover{background:#0059b3;transform:translateY(-1px)}
+.btn-consultar-light{background:#fff;color:#475569;border:1px solid #cbd5e1}
+.btn-consultar-light:hover{background:#f8fafc;border-color:#94a3b8}
+.mini{margin:20px 0 0;font-size:13px;color:#64748b}
+.mini a{color:#0020C2;font-weight:700;text-decoration:none;border-bottom:1px solid rgba(0,32,194,.4)}
+.mini a:hover{color:#0059b3;border-bottom-color:#0059b3}
+@media(max-width:520px){
+  .tarjeta-corporativa-white{padding:28px 20px;border-radius:18px}
+  .titulo-header-glass{margin:-28px -20px 24px -20px;border-top-left-radius:18px;border-top-right-radius:18px}
+  .btn-presentar-light,.btn-consultar-light{width:100%}
+}
+
+.tarjeta-corporativa-white.ancha{max-width:760px;text-align:left}
+.tarjeta-corporativa-white.ancha .titulo-header-glass{text-align:center}
+.pq-l{display:block;margin:14px 0 6px;font-size:13px;font-weight:700;color:#475569}
+.pq-in{width:100%;box-sizing:border-box;padding:12px 14px;border:1px solid #cbd5e1;border-radius:10px;font:inherit;font-size:15px;color:#0f172a;background:#fff}
+.pq-in:focus{outline:2px solid rgba(0,32,194,.35);border-color:#0020C2}
+textarea.pq-in{min-height:140px;resize:vertical}
+.pq-2{display:grid;grid-template-columns:1fr 1fr;gap:14px}@media(max-width:560px){.pq-2{grid-template-columns:1fr}}
+.pq-av{padding:12px 14px;border-radius:10px;margin:0 0 16px;font-size:14px}
+.pq-av.err{background:#fef2f2;color:#b91c1c;border:1px solid #fecaca}.pq-av.ok{background:#ecfdf3;color:#067647;border:1px solid #abefc6}.pq-av.info{background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe}
+.pq-caso{display:flex;flex-wrap:wrap;gap:6px 16px;justify-content:space-between;align-items:center;padding:14px 16px;margin:0 0 10px;border:1px solid #e2e8f0;border-radius:12px;background:rgba(255,255,255,.8);text-decoration:none;color:inherit}
+.pq-caso b{color:#0020C2}.pq-caso small{color:#64748b}
+.pq-est{padding:4px 12px;border-radius:999px;font-size:12px;font-weight:700;background:#dbeafe;color:#1e40af}.pq-est.cerrado{background:#dcfce7;color:#166534}
+.pq-bloque{margin:0 0 16px;padding:14px 16px;border:1px solid #e2e8f0;border-radius:12px;background:rgba(255,255,255,.8);white-space:pre-line;line-height:1.6;font-size:15px}
+.pq-bloque b{display:block;color:#0020C2;margin-bottom:4px}
+.pq-sub{margin:0 0 16px;color:#64748b;font-size:14px}
+.btn-presentar-light{border:0;cursor:pointer;font:inherit;font-weight:600}
+</style></head><body>
+<div class="fondo-corporativo-light">
+  <div class="top navbar-light-glass"><h1>Gestión PQR OnLine</h1><a href="/">Inicio TiendaTrack</a></div>
+  <div class="centro-pqr"><div class="tarjeta-corporativa-white {% block ancho %}{% endblock %}">
+    <div class="titulo-header-glass">{% block cabecera %}Gestión PQR OnLine{% endblock %}</div>
+    {% block cuerpo %}{% endblock %}
+  </div></div>
+  {% include 'marco_pie.html' %}
+</div>
+</body></html>
+''',
+    'pqr.html': r'''{% extends "pqr_base.html" %}
+{% block cuerpo %}
+<p class="texto-intro-pqr">Canal oficial de peticiones, quejas, reclamos y sugerencias de TiendaTrack.</p>
+<div class="btn-row">
+  <a class="btn-presentar-light" href="{{ url_for('pqr_crear') }}">Presentar PQR</a>
+  <a class="btn-consultar-light" href="{{ url_for('pqr_consulta') }}">Consultar PQR</a>
+</div>
+<p class="mini">Tiempo estimado de respuesta: aproximadamente {{ dias }} días hábiles.</p>
+<p class="mini"><a href="{{ procsis }}/pqr-info" target="_blank" rel="noopener">Información de interés: cómo radicar una PQR</a></p>
+{% endblock %}
+''',
+    'pqr_crear.html': r'''{% extends "pqr_base.html" %}
+{% block titulo %}Presentar PQR{% endblock %}
+{% block ancho %}ancha{% endblock %}
+{% block cabecera %}Presentar PQR{% endblock %}
+{% block cuerpo %}
+<p class="pq-sub">Tu solicitud se radica en PROCSIS y llega al área de Soluciones. Respuesta en aproximadamente {{ dias }} días hábiles.</p>
+{% if error %}<div class="pq-av err" role="alert">{{ error }}</div>{% endif %}
+{% if sin_servicio %}<div class="pq-av info">El servicio de PQR no responde en este momento. Intenta de nuevo en un minuto.</div>{% endif %}
+<form method="post" action="{{ url_for('pqr_crear') }}">
   <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="ref" value="{{ ref }}">
-  <div class="fila2">
-    <div><label for="tipo">Tipo</label>
-      <select class="campo" id="tipo" name="tipo" required><option value="">Elige…</option>{% for t in tipos %}<option value="{{ t.clave }}" {{ 'selected' if f.tipo == t.clave }}>{{ t.nombre }}</option>{% endfor %}</select></div>
-    <div><label for="categoria">Tema</label>
-      <select class="campo" id="categoria" name="categoria" required><option value="">Elige…</option>{% for c in cats %}<option value="{{ c.clave }}" {{ 'selected' if f.categoria == c.clave }}>{{ c.nombre }}</option>{% endfor %}</select></div>
+  <div class="pq-2">
+    <div><label class="pq-l" for="tipo">Tipo</label>
+      <select class="pq-in" id="tipo" name="tipo" required><option value="">Elige…</option>{% for t in tipos %}<option value="{{ t.clave }}" {{ 'selected' if f.tipo == t.clave }}>{{ t.nombre }}</option>{% endfor %}</select></div>
+    <div><label class="pq-l" for="categoria">Tema</label>
+      <select class="pq-in" id="categoria" name="categoria" required><option value="">Elige…</option>{% for c in cats %}<option value="{{ c.clave }}" {{ 'selected' if f.categoria == c.clave }}>{{ c.nombre }}</option>{% endfor %}</select></div>
   </div>
-  <label for="asunto">Asunto</label>
-  <input class="campo" id="asunto" name="asunto" type="text" maxlength="120" value="{{ f.asunto }}" required>
-  <label for="descripcion">Cuéntanos qué pasó</label>
-  <textarea class="campo" id="descripcion" name="descripcion" maxlength="4000" required>{{ f.descripcion }}</textarea>
-  <p class="ayuda">Mínimo 10 caracteres. No incluyas claves ni datos de tarjetas.</p>
-  <button class="btn" type="submit" {{ 'disabled' if sin_servicio }}>Radicar PQR</button>
+  <label class="pq-l" for="asunto">Asunto</label>
+  <input class="pq-in" id="asunto" name="asunto" type="text" maxlength="120" value="{{ f.asunto }}" required>
+  <label class="pq-l" for="descripcion">Cuéntanos qué pasó</label>
+  <textarea class="pq-in" id="descripcion" name="descripcion" maxlength="4000" required>{{ f.descripcion }}</textarea>
+  <p class="mini" style="text-align:left">Mínimo 10 caracteres. No incluyas claves ni datos de tarjetas.</p>
+  <div class="btn-row" style="margin-top:18px"><button class="btn-presentar-light" type="submit" {{ 'disabled' if sin_servicio }}>Radicar PQR</button>
+  <a class="btn-consultar-light" href="{{ url_for('pqr') }}">Volver</a></div>
 </form>
-<h3 class="pq-h">Tus casos</h3>
+{% endblock %}
+''',
+    'pqr_consulta.html': r'''{% extends "pqr_base.html" %}
+{% block titulo %}Consultar PQR{% endblock %}
+{% block ancho %}ancha{% endblock %}
+{% block cabecera %}Consultar PQR{% endblock %}
+{% block cuerpo %}
+{% if sin_servicio %}<div class="pq-av info">No pudimos consultar PROCSIS en este momento. Intenta de nuevo en un minuto.</div>{% endif %}
+<form method="post" action="{{ url_for('pqr_consulta') }}" style="margin:0 0 22px">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label class="pq-l" for="radicado">Buscar por número de radicado</label>
+  <div style="display:flex;gap:10px;flex-wrap:wrap"><input class="pq-in" style="flex:1;min-width:180px" id="radicado" name="radicado" type="text" inputmode="numeric" placeholder="Ej. 33-0001">
+  <button class="btn-presentar-light" type="submit" style="min-width:120px;padding:12px 20px">Consultar</button></div>
+</form>
+<label class="pq-l">Tus casos</label>
 {% for c in casos %}
 <a class="pq-caso" href="{{ url_for('pqr_detalle', radicado=c.radicado) }}">
   <span><b>{{ c.radicado_formato }}</b><br><small>{{ c.tipo }} · {{ c.asunto }}</small></span>
   <span><span class="pq-est {{ '' if c.abierto else 'cerrado' }}">{{ c.estado }}</span>{% if c.fecha_limite %}<br><small>Límite: {{ c.fecha_limite }}</small>{% endif %}</span>
 </a>
-{% else %}<p class="ayuda">Aún no has radicado casos.</p>{% endfor %}
+{% else %}<p class="mini" style="text-align:left">Aún no has radicado casos.</p>{% endfor %}
+<div class="btn-row" style="margin-top:18px"><a class="btn-presentar-light" href="{{ url_for('pqr_crear') }}">Presentar PQR</a><a class="btn-consultar-light" href="{{ url_for('pqr') }}">Volver</a></div>
 {% endblock %}
 ''',
-    'pqr_detalle.html': r'''{% extends "publico_base.html" %}
+    'pqr_detalle.html': r'''{% extends "pqr_base.html" %}
 {% block titulo %}PQR {{ p.radicado_formato }}{% endblock %}
-{% block nav %}<a class="vidrio" href="{{ url_for('pqr') }}">Mis PQR</a>{% endblock %}
-{% block hero %}{% endblock %}
-{% block tarjeta %}
-<style>main{grid-template-columns:minmax(0,1fr)!important}.tarjeta{max-width:900px!important}textarea.campo{min-height:100px;resize:vertical}
-.pq-bloque{margin:0 0 16px;padding:14px 16px;border:1px solid rgba(10,42,143,.14);border-radius:16px;background:rgba(255,255,255,.7);white-space:pre-line;line-height:1.6}
-.pq-bloque b{display:block;color:#0a2a8f;margin-bottom:4px}</style>
-<h2>PQR {{ p.radicado_formato }}</h2>
-<p class="sub">{{ p.tipo }} · {{ p.categoria_nombre }} · Estado: <b>{{ p.estado }}</b>{% if p.fecha_limite %} · Respuesta a más tardar el {{ p.fecha_limite }}{% endif %}</p>
-{% if aviso %}<div class="aviso ok" role="status">{{ aviso }}</div>{% endif %}
-{% if error %}<div class="aviso err" role="alert">{{ error }}</div>{% endif %}
+{% block ancho %}ancha{% endblock %}
+{% block cabecera %}PQR {{ p.radicado_formato }}{% endblock %}
+{% block cuerpo %}
+<p class="pq-sub">{{ p.tipo }} · {{ p.categoria_nombre }} · Estado: <b>{{ p.estado }}</b>{% if p.fecha_limite %} · Respuesta a más tardar el {{ p.fecha_limite }}{% endif %}</p>
+{% if aviso %}<div class="pq-av ok" role="status">{{ aviso }}</div>{% endif %}
+{% if error %}<div class="pq-av err" role="alert">{{ error }}</div>{% endif %}
 <div class="pq-bloque"><b>{{ p.asunto }}</b>{{ p.descripcion }}</div>
 {% if p.respuesta %}<div class="pq-bloque"><b>Respuesta de PROCSIS{% if p.fecha_respuesta %} · {{ p.fecha_respuesta }}{% endif %}</b>{{ p.respuesta }}</div>{% endif %}
 {% if p.abierto %}
 <form method="post" action="{{ url_for('pqr_detalle', radicado=p.radicado) }}">
   <input type="hidden" name="csrf" value="{{ csrf }}">
-  <label for="mensaje">Agregar un mensaje al caso</label>
-  <textarea class="campo" id="mensaje" name="mensaje" maxlength="1000" required></textarea>
-  <button class="btn" type="submit">Enviar mensaje</button>
+  <label class="pq-l" for="mensaje">Agregar un mensaje al caso</label>
+  <textarea class="pq-in" id="mensaje" name="mensaje" maxlength="1000" required style="min-height:100px"></textarea>
+  <div class="btn-row" style="margin-top:16px"><button class="btn-presentar-light" type="submit">Enviar mensaje</button><a class="btn-consultar-light" href="{{ url_for('pqr_consulta') }}">Mis PQR</a></div>
 </form>
-{% else %}<p class="ayuda">Este caso está cerrado. Si necesitas algo más, radica una PQR nueva.</p>{% endif %}
+{% else %}<p class="mini" style="text-align:left">Este caso está cerrado. Si necesitas algo más, presenta una PQR nueva.</p>
+<div class="btn-row"><a class="btn-presentar-light" href="{{ url_for('pqr_crear') }}">Presentar PQR</a></div>{% endif %}
 {% endblock %}
+''',
+    'puntos.html': r'''<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sedes y puntos de atención · TiendaTrack</title>
+<style>html,body{margin:0;background:#fff;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",Roboto,Helvetica,Arial,sans-serif}</style></head><body>
+{% include 'marco_menu.html' %}
+{{ pagina | safe }}
+{% include 'marco_pie.html' %}
+{% include 'marco_ventanas.html' %}
+</body></html>
 ''',
     'login.html': r'''{% extends "publico_base.html" %}
 {% block titulo %}Ingresar{% endblock %}
