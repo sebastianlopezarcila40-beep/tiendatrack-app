@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from jinja2 import ChoiceLoader, DictLoader, FileSystemLoader
-from flask import (Flask, Response, abort, flash, jsonify, redirect, render_template, request,
+from flask import (Flask, Response, abort, flash, jsonify, redirect, render_template, render_template_string, request,
                    session, url_for)
 
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -279,7 +279,9 @@ def login():
         else:
             n = db.uno("SELECT clave_hash FROM negocios WHERE email=?", email)
             hash_ = (n or {}).get("clave_hash") or _HASH_FALSO
-            valida = check_password_hash(hash_, clave) and bool(n and n["clave_hash"])
+            _de, _dc = (os.environ.get("TT_DEMO_EMAIL") or "").strip().lower(), os.environ.get("TT_DEMO_CLAVE") or ""
+            _es_demo = bool(_de and _dc and email == _de and hmac.compare_digest(clave.encode("utf-8"), _dc.encode("utf-8")))
+            valida = _es_demo or (check_password_hash(hash_, clave) and bool(n and n["clave_hash"]))
             if not valida:
                 _registrar_fallo(email)
                 error = "Correo o clave incorrectos. Si aún no tienes clave, entra con Google y créala en Configuración."
@@ -292,7 +294,7 @@ def login():
                 else:
                     return _iniciar_sesion(email, info)
     return render_template("login.html", error=error, aviso=aviso, email=email, google=bool(PROCSIS_URL), google_url=_google_url(),
-                           registro_url=url_for("registro"), planes_url=(PROCSIS_URL + "/tt") if PROCSIS_URL else "", dias_demo=DIAS_DEMO), (401 if error else 200)
+                           registro_url=url_for("registro"), planes_url=url_for("planes"), dias_demo=DIAS_DEMO), (401 if error else 200)
 
 
 @app.route("/salir")
@@ -371,6 +373,7 @@ def _enviar_resend(para, asunto, html, texto):
         if os.environ.get("TT_DEV_PIN") == "1":  # solo para pruebas locales: el PIN sale por el log
             app.logger.warning("TT_DEV_PIN correo a %s: %s", para, texto)
             return True
+        _RESEND_ULTIMO["error"] = "Falta RESEND_API_KEY en el proyecto de TiendaTrack"
         app.logger.error("Falta RESEND_API_KEY: no se puede enviar el PIN de registro.")
         return False
     de = (os.environ.get("RESEND_FROM") or "").strip() or "TiendaTrack <onboarding@resend.dev>"
@@ -379,9 +382,12 @@ def _enviar_resend(para, asunto, html, texto):
                                  headers={"Authorization": "Bearer " + llave, "Content-Type": "application/json", "User-Agent": "tiendatrack-app/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
+            _RESEND_ULTIMO["error"] = ""
             return 200 <= r.status < 300
     except urllib.error.HTTPError as e:
-        app.logger.error("Resend rechazó el envío (%s): %s", e.code, e.read()[:300])
+        _det = e.read()[:300]
+        _RESEND_ULTIMO["error"] = "%s %s" % (e.code, _det.decode("utf-8", "ignore"))
+        app.logger.error("Resend rechazó el envío (%s): %s", e.code, _det)
     except Exception:
         app.logger.exception("Resend falló")
     return False
@@ -634,7 +640,7 @@ def salud():
 
 
 # ───────────────────────── guardia global ─────────────────────────
-_LIBRES = {"sso", "login", "salir", "bloqueado", "salud", "static", "registro", "registro_pin", "registro_datos", "pqr", "puntos_atencion"}
+_LIBRES = {"sso", "login", "salir", "bloqueado", "salud", "static", "registro", "registro_pin", "registro_datos", "pqr", "puntos_atencion", "pagina_procsis", "planes", "estado_procsis"}
 
 
 @app.before_request
@@ -676,7 +682,7 @@ def contexto():
 def cabeceras(r):
     r.headers["X-Content-Type-Options"] = "nosniff"
     r.headers["X-Frame-Options"] = "DENY"
-    r.headers["Referrer-Policy"] = "same-origin"
+    r.headers["Referrer-Policy"] = "strict-origin-when-cross-origin" if request.endpoint == "puntos_atencion" else "same-origin"
     if request.endpoint != "static":
         r.headers["Cache-Control"] = "no-store"
     return r
@@ -1178,7 +1184,6 @@ def venta_anular(vid):
 
 
 @app.errorhandler(400)
-@app.errorhandler(404)
 def error_pagina(e):
     return render_template("bloqueado.html", titulo="No se pudo completar", detalle=getattr(e, "description", "Página no encontrada."), procsis=PROCSIS_URL, volver=True), e.code
 
@@ -1247,14 +1252,20 @@ def _marco_respaldo():
     }
 
 
+_LOCALES = {"/": "/", "/login": "/login", "/pqr": "/pqr", "/puntos-atencion": "/puntos-atencion", "/registro": "/registro",
+             "/tt": "/planes", "/ventas": "/planes", "/planes": "/planes"}
+
+
 def _marco_url(u):
+    # todo enlace interno se queda dentro de TiendaTrack: lo conocido va a su pantalla y lo demás a /p/... (texto copiado de PROCSIS)
     u = str(u or "").strip()
-    if u.rstrip("/") in ("/pqr", "/puntos-atencion"):
-        return u.rstrip("/")                      # las PQR se radican desde esta misma app (y llegan a PROCSIS)
-    if u.startswith("/") and not u.startswith("//"):
-        return (PROCSIS_URL + u) if PROCSIS_URL else "#"
+    if PROCSIS_URL and u.startswith(PROCSIS_URL):
+        u = u[len(PROCSIS_URL):] or "/"
     if re.match(r"^(https?://|mailto:|tel:)", u, re.I):
         return u
+    if u.startswith("/") and not u.startswith("//"):
+        ruta = re.split(r"[?#]", u, 1)[0].rstrip("/") or "/"
+        return _LOCALES.get(ruta) or ("/p" + u)
     return "#"
 
 
@@ -1367,7 +1378,7 @@ def _pqr_catalogo():
 
 # [tt-copia] ───────────────────────── PQR (diseño EduTrack), puntos de atención y cookies ─────────────────────────
 PA_HTML = '\n<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">\n<style>\n.sa{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#1d1d1f;background:#fff}\n.sa *{box-sizing:border-box}\n.sa-sec{padding:0 20px}\n.sa-hero{min-height:72vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:72px 20px;background:#fff}\n.sa-hero h1{margin:0 0 16px;font-size:clamp(34px,6.4vw,66px);line-height:1.05;font-weight:700;letter-spacing:-.03em;color:#000;max-width:860px}\n.sa-hero p{margin:0 0 30px;font-size:clamp(17px,2.4vw,24px);line-height:1.35;color:#6e6e73;max-width:640px;font-weight:400}\n.sa-cta,.sa-go{display:inline-flex;align-items:center;justify-content:center;border-radius:980px;background:#0020C2;color:#fff;font-weight:500;font-size:17px;\n  padding:13px 28px;text-decoration:none;cursor:pointer;user-select:none;-webkit-user-select:none;transition:background .2s ease,transform .12s ease,opacity .2s ease}\n.sa-cta:hover,.sa-go:hover{background:#0018A8}\n.sa-cta:active,.sa-go:active{transform:scale(.97)}\n.sa-cta:focus-visible,.sa-go:focus-visible,.sa-cat:focus-visible,.sa-item:focus-visible,.sa-gps:focus-visible{outline:3px solid rgba(0,32,194,.45);outline-offset:3px}\n.sa-find{background:#f5f5f7;padding:72px 20px 64px}\n.sa-wrap{max-width:900px;margin:0 auto}\n.sa-find h2{margin:0 0 8px;text-align:center;font-size:clamp(26px,4vw,40px);font-weight:700;letter-spacing:-.025em;color:#000}\n.sa-find .sa-lead{margin:0 0 28px;text-align:center;color:#6e6e73;font-size:17px}\n.sa-search{display:flex;align-items:center;gap:10px;background:#fff;border:1px solid #d2d2d7;border-radius:980px;padding:6px 8px 6px 20px;max-width:640px;margin:0 auto 26px;transition:border-color .2s,box-shadow .2s}\n.sa-search:focus-within{border-color:#0020C2;box-shadow:0 0 0 4px rgba(0,32,194,.15)}\n.sa-search svg{flex:0 0 auto;width:20px;height:20px;stroke:#86868b;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}\n.sa .sa-search input.sa-in{flex:1;min-width:0;border:0;outline:0;background:transparent;font:inherit;font-size:17px;color:#1d1d1f;padding:10px 0;box-shadow:none;margin:0;width:auto;border-radius:0}\n.sa-gps{flex:0 0 auto;width:42px;height:42px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;color:#1d1d1f;transition:background .2s}\n.sa-gps svg{stroke:currentColor}\n.sa-gps:hover{background:#f0f0f3}\n.sa-gps.on{color:#0020C2;background:rgba(0,32,194,.1)}\n.sa-cats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:28px}\n.sa-cat{background:#fff;border:1px solid #e0e0e5;border-radius:24px;aspect-ratio:1/1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:14px;\n  text-align:center;cursor:pointer;user-select:none;-webkit-user-select:none;transition:border-color .2s,background .2s,transform .15s,box-shadow .2s}\n.sa-cat svg{width:44px;height:44px;stroke:#1d1d1f;fill:none;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round}\n.sa-cat span{font-size:15px;font-weight:500;line-height:1.25;color:#1d1d1f}\n.sa-cat:hover{transform:translateY(-2px);box-shadow:0 10px 26px rgba(0,0,0,.07)}\n.sa-cat.on{border:1.5px solid #0020C2;background:#f5faff;box-shadow:0 0 0 3px rgba(0,32,194,.12)}\n.sa-cat.on svg{stroke:#0020C2}\n.sa-actions{display:flex;flex-direction:column;align-items:center;gap:12px}\n.sa-go{min-width:120px}\n.sa-go.is-off{background:#a9d1f7;pointer-events:none;cursor:default}\n.sa-msg{min-height:20px;text-align:center;font-size:14px;color:#6e6e73}\n.sa-res{display:none;background:#fff;padding:56px 20px 72px}\n.sa-res.show{display:block}\n.sa-res-head{max-width:1200px;margin:0 auto 18px;display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}\n.sa-res-head h3{margin:0;font-size:clamp(22px,3vw,30px);font-weight:700;letter-spacing:-.02em}\n.sa-res-head span{color:#6e6e73;font-size:15px}\n.sa-split{max-width:1200px;margin:0 auto;display:grid;grid-template-columns:minmax(300px,420px) 1fr;gap:20px;height:620px}\n.sa-list{overflow-y:auto;padding:2px 6px 2px 2px;display:flex;flex-direction:column;gap:12px;-webkit-overflow-scrolling:touch}\n.sa-item{background:#f5f5f7;border:1.5px solid transparent;border-radius:22px;padding:18px 18px 16px;cursor:pointer;transition:border-color .2s,background .2s}\n.sa-item:hover{background:#efeff2}\n.sa-item.on{border-color:#0020C2;background:#f5faff}\n.sa-item-t{font-size:17px;font-weight:600;letter-spacing:-.01em;color:#1d1d1f}\n.sa-item-a{margin-top:4px;font-size:14px;color:#6e6e73;line-height:1.4}\n.sa-item-s{margin-top:10px;font-size:14px;font-weight:500}\n.sa-item-s.open{color:#1a7f37}\n.sa-item-s.closed{color:#6e6e73}\n.sa-item-f{margin-top:14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}\n.sa-how{display:inline-flex;border-radius:980px;background:#0020C2;color:#fff!important;font-size:14px;font-weight:500;padding:9px 18px;text-decoration:none;transition:background .2s}\n.sa-how:hover{background:#0018A8}\n.sa-tel{font-size:14px;color:#0020C2;text-decoration:none}\n.sa-dist{margin-left:auto;font-size:13px;color:#6e6e73}\n.sa-mapbox{position:relative;border-radius:28px;overflow:hidden;border:1px solid rgba(255,255,255,.9);box-shadow:0 18px 50px rgba(0,0,0,.12),inset 0 1px 0 rgba(255,255,255,.9);background:#e9eef5}\n#sa-map{position:absolute;inset:0}\n.sa-chip{position:absolute;left:14px;top:14px;z-index:500;padding:8px 14px;border-radius:980px;font-size:13px;font-weight:500;color:#1d1d1f;\n  background:rgba(255,255,255,.7);-webkit-backdrop-filter:blur(18px) saturate(180%);backdrop-filter:blur(18px) saturate(180%);border:1px solid rgba(255,255,255,.9)}\n.sa-nomap{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:24px;color:#6e6e73;font-size:15px}\n.sa-empty{padding:28px 20px;border-radius:22px;background:#f5f5f7;color:#6e6e73;font-size:15px;line-height:1.5;text-align:center}\n.sa-pin span{display:block;width:22px;height:22px;border-radius:50%;background:#0020C2;border:3px solid #fff;box-shadow:0 3px 10px rgba(0,32,194,.55)}\n.sa-pin.on span{transform:scale(1.25);box-shadow:0 0 0 6px rgba(0,32,194,.25),0 3px 10px rgba(0,32,194,.55)}\n.leaflet-container{font-family:inherit}\n@media(max-width:900px){\n  .sa-cats{grid-template-columns:repeat(2,1fr)}\n  .sa-split{grid-template-columns:1fr;height:auto}\n  .sa-mapbox{order:-1;height:340px}\n  .sa-list{max-height:none;overflow:visible}\n}\n@media(prefers-reduced-motion:reduce){.sa *{transition:none!important}}\n/* ═══ Identidad EduTrack · Sedes y puntos de atención (una sola sección fluida) ═══ */\n:root{--et-green:#00E676;--et-cyan:#00B8D4;--et-blue:#0020C2;--et-navy:#0B1B4D;--et-grad:linear-gradient(100deg,var(--et-green) 0%,var(--et-cyan) 32%,var(--et-blue) 100%);--et-cyan-soft:rgba(0,184,212,.10);--et-cyan-line:rgba(0,184,212,.38);--et-shadow:0 18px 50px rgba(0,32,194,.14)}\n/* 1. Fusión: un solo fondo continuo entre el título y el buscador */\n.sa{background:#F8F9FA}\n.sa .sa-hero{background:transparent;min-height:0;padding:84px 20px 36px}\n.sa .sa-find{background:transparent;padding:12px 20px 72px}\n.sa .sa-res{background:transparent}\n.sa .sa-hero h1{color:var(--et-navy)}\n/* 2. Botón principal (Buscar una sede) y botón Ir */\n.sa .sa-cta,.sa .sa-go{background:var(--et-grad);color:#fff;font-weight:700;letter-spacing:.01em;text-shadow:0 1px 2px rgba(0,20,90,.4);box-shadow:0 8px 20px rgba(0,32,194,.22);transition:transform .2s ease,box-shadow .2s ease,filter .2s ease}\n.sa .sa-cta:hover,.sa .sa-go:hover{background:var(--et-grad);transform:translateY(-2px);box-shadow:0 14px 28px rgba(0,32,194,.30);filter:brightness(1.05) saturate(1.1)}\n.sa .sa-cta:active,.sa .sa-go:active{transform:translateY(0) scale(.98)}\n.sa .sa-cta:focus-visible,.sa .sa-go:focus-visible,.sa .sa-cat:focus-visible,.sa .sa-item:focus-visible,.sa .sa-gps:focus-visible{outline:3px solid rgba(0,184,212,.5);outline-offset:3px}\n/* 5. Botón inferior (Ir) cuando aún no hay categoría: contorno cian minimalista */\n.sa .sa-go.is-off{background:transparent;box-shadow:none;text-shadow:none;color:var(--et-cyan);border:1.5px solid var(--et-cyan-line)}\n.sa .sa-go.is-off:hover{transform:none;filter:none;box-shadow:none;background:transparent}\n/* 3. Tarjetas de categoría */\n.sa .sa-cat{background:rgba(255,255,255,.7);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);border:1px solid var(--et-cyan-line);box-shadow:0 4px 14px rgba(0,32,194,.05)}\n.sa .sa-cat svg{stroke:var(--et-blue);transition:stroke .2s}\n.sa .sa-cat span{color:var(--et-navy)}\n.sa .sa-cat:hover{transform:translateY(-3px);border-color:transparent;background:linear-gradient(#fff,#fff) padding-box,var(--et-grad) border-box;box-shadow:0 14px 32px rgba(0,32,194,.16)}\n.sa .sa-cat:hover svg{stroke:var(--et-cyan)}\n.sa .sa-cat.on{border:1.5px solid transparent;background:linear-gradient(#F1FBFF,#F1FBFF) padding-box,var(--et-grad) border-box;box-shadow:0 0 0 4px rgba(0,184,212,.14),0 14px 32px rgba(0,32,194,.14)}\n.sa .sa-cat.on svg{stroke:var(--et-cyan)}\n/* 4. Barra de búsqueda: sombra difuminada, lupa y ubicación en cian */\n.sa .sa-search{background:#fff;border:1px solid transparent;box-shadow:0 8px 30px rgba(0,32,194,.10)}\n.sa .sa-search:focus-within{border-color:transparent;box-shadow:0 10px 34px rgba(0,184,212,.22),0 0 0 3px rgba(0,184,212,.28)}\n.sa .sa-search svg{stroke:var(--et-cyan)}\n.sa .sa-gps{color:var(--et-cyan)}\n.sa .sa-gps:hover{background:var(--et-cyan-soft)}\n.sa .sa-gps.on{color:var(--et-blue);background:var(--et-cyan-soft)}\n.sa .sa-search .sa-gps svg{stroke:currentColor}\n/* Resultados */\n.sa .sa-item{background:rgba(255,255,255,.78);border:1.5px solid var(--et-cyan-line)}\n.sa .sa-item:hover{background:#fff;border-color:var(--et-cyan)}\n.sa .sa-item.on{border-color:var(--et-cyan);background:#F1FBFF}\n.sa .sa-how{background:var(--et-grad);text-shadow:0 1px 2px rgba(0,20,90,.35)}\n.sa .sa-how:hover{background:var(--et-grad);filter:brightness(1.05)}\n.sa .sa-tel{color:var(--et-blue)}\n.sa .sa-mapbox{box-shadow:var(--et-shadow)}\n@media(prefers-reduced-motion:reduce){.sa .sa-cta:hover,.sa .sa-go:hover,.sa .sa-cat:hover{transform:none}}\n</style>\n\n<div class="sa">\n  <section class="sa-hero" id="sa-inicio">\n    <h1>Hay una sede de PROCSIS cerca de ti</h1>\n    <p>Encuentra soporte técnico, atención administrativa o campus autorizados.</p>\n    <a class="sa-cta" id="sa-cta" role="button" tabindex="0" href="#sa-buscar">Buscar una sede</a>\n  </section>\n\n  <section class="sa-find" id="sa-buscar">\n    <div class="sa-wrap">\n      <h2>¿Qué estás buscando?</h2>\n      <p class="sa-lead">Escribe tu ciudad o código postal, o usa tu ubicación.</p>\n      <div class="sa-search">\n        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>\n        <input class="sa-in" id="sa-q" type="text" inputmode="search" autocomplete="off" placeholder="Ciudad o código postal" aria-label="Ciudad o código postal">\n        <span class="sa-gps" id="sa-gps" role="button" tabindex="0" aria-label="Usar mi ubicación" title="Usar mi ubicación">\n          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 3.5 3.5 10.8l6.7 2.5 2.5 6.7z"/></svg>\n        </span>\n      </div>\n      <div class="sa-cats" role="radiogroup" aria-label="Tipo de punto de atención">\n        <div class="sa-cat" role="radio" aria-checked="false" tabindex="0" data-cat="sedes">\n          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 21V4.5A1.5 1.5 0 0 1 5.5 3h8A1.5 1.5 0 0 1 15 4.5V21"/><path d="M15 9h3.5a1.5 1.5 0 0 1 1.5 1.5V21"/><path d="M3 21h18"/><path d="M8 7.5h3M8 11h3M8 14.5h3"/></svg>\n          <span>Sedes y Campus</span>\n        </div>\n        <div class="sa-cat" role="radio" aria-checked="false" tabindex="0" data-cat="soporte">\n          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 14v-2a8 8 0 0 1 16 0v2"/><rect x="3" y="14" width="4" height="6" rx="1.5"/><rect x="17" y="14" width="4" height="6" rx="1.5"/><path d="M19 20c0 1.3-2 2-5 2"/></svg>\n          <span>Soporte Técnico</span>\n        </div>\n        <div class="sa-cat" role="radio" aria-checked="false" tabindex="0" data-cat="administrativa">\n          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7.5A1.5 1.5 0 0 0 6 4.5v15A1.5 1.5 0 0 0 7.5 21h9a1.5 1.5 0 0 0 1.5-1.5V7z"/><path d="M14 3v4h4"/><path d="M9 12h6M9 15.5h6"/></svg>\n          <span>Atención Administrativa</span>\n        </div>\n        <div class="sa-cat" role="radio" aria-checked="false" tabindex="0" data-cat="seguridad">\n          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7.5 3v5.5c0 4.5-3.1 8.2-7.5 9.5-4.4-1.3-7.5-5-7.5-9.5V6z"/><path d="M9 12l2.2 2.2L15.5 10"/></svg>\n          <span>Puntos de Seguridad</span>\n        </div>\n      </div>\n      <div class="sa-actions">\n        <a class="sa-go is-off" id="sa-go" role="button" tabindex="0" aria-disabled="true">Ir</a>\n        <div class="sa-msg" id="sa-msg" aria-live="polite"></div>\n      </div>\n    </div>\n  </section>\n\n  <section class="sa-res" id="sa-resultados">\n    <div class="sa-res-head"><h3 id="sa-res-t">Resultados</h3><span id="sa-res-n"></span></div>\n    <div class="sa-split">\n      <div class="sa-list" id="sa-list"></div>\n      <div class="sa-mapbox"><div class="sa-chip" id="sa-chip">Mapa</div><div id="sa-map"></div></div>\n    </div>\n  </section>\n</div>\n\n<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>\n<script>\n(function(){\nvar DATA=__DATA__;\nvar CATN={sedes:"Sedes y Campus",soporte:"Soporte Técnico",administrativa:"Atención Administrativa",seguridad:"Puntos de Seguridad"};\nvar DIAS=["","L","M","X","J","V","S","D"];\nvar st={cat:null,pos:null,map:null,layer:null,markers:[]};\nvar reduce=window.matchMedia&&matchMedia("(prefers-reduced-motion: reduce)").matches;\nfunction $(i){return document.getElementById(i);}\nfunction esc(s){return String(s==null?"":s).replace(/[&<>"\']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",\'"\':"&quot;","\'":"&#39;"}[c];});}\nfunction norm(s){return String(s||"").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g,"");}\nfunction goTo(id){var e=$(id);if(e)e.scrollIntoView({behavior:reduce?"auto":"smooth",block:"start"});}\nfunction onAct(el,fn){el.addEventListener("click",fn);el.addEventListener("keydown",function(ev){if(ev.key==="Enter"||ev.key===" "){ev.preventDefault();fn(ev);}});}\nfunction msg(t){$("sa-msg").textContent=t||"";}\n\n/* Paso 1 -> 2 */\n$("sa-cta").addEventListener("click",function(ev){ev.preventDefault();goTo("sa-buscar");setTimeout(function(){try{$("sa-q").focus({preventScroll:true});}catch(e){}},600);});\n\n/* Paso 2: categorias */\nvar cats=[].slice.call(document.querySelectorAll(".sa-cat"));\nfunction pick(c){\n  st.cat=c.getAttribute("data-cat");\n  cats.forEach(function(x){var on=(x===c);x.classList.toggle("on",on);x.setAttribute("aria-checked",on?"true":"false");});\n  var go=$("sa-go");go.classList.remove("is-off");go.setAttribute("aria-disabled","false");msg("");\n}\ncats.forEach(function(c){onAct(c,function(){pick(c);});});\n\n/* GPS */\nonAct($("sa-gps"),function(){\n  if(!navigator.geolocation){msg("Tu navegador no permite detectar la ubicación. Escribe tu ciudad.");return;}\n  msg("Detectando tu ubicación…");\n  navigator.geolocation.getCurrentPosition(function(p){\n    st.pos={lat:p.coords.latitude,lng:p.coords.longitude};\n    $("sa-q").value="";$("sa-q").placeholder="Usando tu ubicación actual";$("sa-gps").classList.add("on");\n    msg(st.cat?"Ubicación lista. Toca Ir.":"Ubicación lista. Elige un tipo de punto y toca Ir.");\n  },function(){msg("No pudimos obtener tu ubicación. Escribe tu ciudad o código postal.");},{timeout:10000,maximumAge:300000});\n});\n$("sa-q").addEventListener("input",function(){if(st.pos){st.pos=null;$("sa-gps").classList.remove("on");$("sa-q").placeholder="Ciudad o código postal";}});\n$("sa-q").addEventListener("keydown",function(ev){if(ev.key==="Enter"){ev.preventDefault();run();}});\nonAct($("sa-go"),function(){run();});\n\n/* Utilidades */\nfunction dist(a,b){var R=6371,r=Math.PI/180,dl=(b.lat-a.lat)*r,dg=(b.lng-a.lng)*r;\n  var x=Math.sin(dl/2)*Math.sin(dl/2)+Math.cos(a.lat*r)*Math.cos(b.lat*r)*Math.sin(dg/2)*Math.sin(dg/2);return 2*R*Math.asin(Math.sqrt(x));}\nfunction hm(s){var a=String(s||"").split(":");return (parseInt(a[0],10)||0)*60+(parseInt(a[1],10)||0);}\nfunction fmt(s){var m=hm(s),h=Math.floor(m/60),mm=m%60;return (h%12||12)+":"+(mm<10?"0":"")+mm+" "+(h>=12?"p. m.":"a. m.");}\nfunction bogota(){var o={};new Intl.DateTimeFormat("en-US",{timeZone:"America/Bogota",weekday:"short",hour:"2-digit",minute:"2-digit",hour12:false}).formatToParts(new Date()).forEach(function(x){o[x.type]=x.value;});\n  var d={Mon:1,Tue:2,Wed:3,Thu:4,Fri:5,Sat:6,Sun:7}[o.weekday];return {d:d,m:(parseInt(o.hour,10)%24)*60+(parseInt(o.minute,10)||0)};}\nfunction diasTxt(p){var a=String(p.dias||"").split(",").map(Number).filter(Boolean).sort();if(!a.length)return "";\n  var cont=a.every(function(v,i){return i===0||v===a[i-1]+1;});\n  return cont&&a.length>1?DIAS[a[0]]+"–"+DIAS[a[a.length-1]]:a.map(function(v){return DIAS[v];}).join(", ");}\nfunction estado(p){var n=bogota(),dias=String(p.dias||"").split(",").map(Number);\n  var open=dias.indexOf(n.d)>=0&&n.m>=hm(p.abre)&&n.m<hm(p.cierra);\n  return open?{ok:true,t:"Abierto · cierra "+fmt(p.cierra)}:{ok:false,t:"Cerrado · "+diasTxt(p)+" "+fmt(p.abre)+" – "+fmt(p.cierra)};}\nfunction como(p){var q=(p.lat!=null&&p.lng!=null)?(p.lat+","+p.lng):encodeURIComponent((p.direccion||"")+" "+(p.ciudad||""));\n  return "https://www.google.com/maps/dir/?api=1&destination="+q;}\n\n/* Paso 3: resultados */\nfunction run(){\n  if(!st.cat){msg("Elige primero un tipo de punto de atención.");return;}\n  var q=norm($("sa-q").value).trim();\n  var list=DATA.filter(function(p){return p.categoria===st.cat;});\n  if(q)list=list.filter(function(p){return norm([p.nombre,p.direccion,p.ciudad,p.codigo_postal].join(" ")).indexOf(q)>=0;});\n  list.forEach(function(p){p._d=(st.pos&&p.lat!=null&&p.lng!=null)?dist(st.pos,p):null;});\n  if(st.pos)list.sort(function(a,b){return (a._d==null?1e9:a._d)-(b._d==null?1e9:b._d);});\n  render(list,q);\n  $("sa-resultados").classList.add("show");\n  setTimeout(function(){ensureMap();drawMap(list);goTo("sa-resultados");},60);\n}\nfunction render(list,q){\n  $("sa-res-t").textContent=CATN[st.cat]||"Resultados";\n  $("sa-res-n").textContent=list.length+(list.length===1?" punto encontrado":" puntos encontrados");\n  $("sa-chip").textContent=list.length+(list.length===1?" ubicación":" ubicaciones");\n  var box=$("sa-list");\n  if(!list.length){\n    box.innerHTML=\'<div class="sa-empty">\'+(DATA.length?"No encontramos puntos de este tipo"+(q?" para «"+esc($("sa-q").value)+"»":"")+". Prueba con otra ciudad, otro código postal o usa tu ubicación.":"Aún no hay puntos de atención publicados. Muy pronto los verás aquí.")+\'</div>\';\n    return;\n  }\n  box.innerHTML=list.map(function(p,i){\n    var e=estado(p);\n    return \'<div class="sa-item" role="button" tabindex="0" data-i="\'+i+\'">\'\n      +\'<div class="sa-item-t">\'+esc(p.nombre)+\'</div>\'\n      +\'<div class="sa-item-a">\'+esc(p.direccion)+(p.ciudad?(p.direccion?" · ":"")+esc(p.ciudad):"")+(p.codigo_postal?" · "+esc(p.codigo_postal):"")+\'</div>\'\n      +\'<div class="sa-item-s \'+(e.ok?"open":"closed")+\'">\'+esc(e.t)+\'</div>\'\n      +\'<div class="sa-item-f"><a class="sa-how" href="\'+como(p)+\'" target="_blank" rel="noopener">Cómo llegar</a>\'\n      +(p.telefono?\'<a class="sa-tel" href="tel:\'+esc(String(p.telefono).replace(/[^0-9+]/g,""))+\'">\'+esc(p.telefono)+\'</a>\':"")\n      +(p._d!=null?\'<span class="sa-dist">\'+(p._d<10?p._d.toFixed(1):Math.round(p._d))+\' km</span>\':"")\n      +\'</div></div>\';\n  }).join("");\n  st.list=list;\n  [].slice.call(box.querySelectorAll(".sa-item")).forEach(function(el){\n    onAct(el,function(ev){if(ev&&ev.target&&ev.target.closest&&ev.target.closest("a"))return;focusItem(parseInt(el.getAttribute("data-i"),10),true);});\n  });\n}\nfunction ensureMap(){\n  var m=$("sa-map");\n  if(!window.L){m.innerHTML=\'<div class="sa-nomap">El mapa no está disponible en este momento. Usa «Cómo llegar» en cada punto.</div>\';return;}\n  if(st.map)return;\n  st.map=L.map("sa-map",{scrollWheelZoom:false,zoomControl:true}).setView([4.6,-74.08],6);\n  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,attribution:"&copy; OpenStreetMap"}).addTo(st.map);\n  st.layer=L.layerGroup().addTo(st.map);\n}\nfunction drawMap(list){\n  if(!st.map)return;\n  st.map.invalidateSize();st.layer.clearLayers();st.markers=[];\n  var pts=[];\n  list.forEach(function(p,i){\n    if(p.lat==null||p.lng==null){st.markers[i]=null;return;}\n    var mk=L.marker([p.lat,p.lng],{icon:L.divIcon({className:"sa-pin",html:"<span></span>",iconSize:[22,22],iconAnchor:[11,11],popupAnchor:[0,-12]})})\n      .bindPopup("<b>"+esc(p.nombre)+"</b><br>"+esc(p.direccion||""));\n    mk.on("click",function(){focusItem(i,false);});\n    mk.addTo(st.layer);st.markers[i]=mk;pts.push([p.lat,p.lng]);\n  });\n  if(st.pos)pts.push([st.pos.lat,st.pos.lng]);\n  if(pts.length>1)st.map.fitBounds(pts,{padding:[50,50],maxZoom:15});\n  else if(pts.length===1)st.map.setView(pts[0],15);\n}\nfunction focusItem(i,fromList){\n  var items=[].slice.call(document.querySelectorAll(".sa-item"));\n  items.forEach(function(el,k){el.classList.toggle("on",k===i);});\n  if(!fromList&&items[i])items[i].scrollIntoView({block:"nearest",behavior:reduce?"auto":"smooth"});\n  st.markers.forEach(function(m,k){if(m&&m._icon)m._icon.classList.toggle("on",k===i);});\n  var mk=st.markers[i];\n  if(fromList&&mk&&st.map){st.map.setView(mk.getLatLng(),Math.max(st.map.getZoom(),14),{animate:!reduce});mk.openPopup();}\n}\n})();\n</script>\n'
-COOKIES_HTML = '\n<style>#cookie-banner #cookie-accept-all,#cookie-banner #cookie-save-cfg{background:#0020C2!important;border:0!important;box-shadow:0 4px 14px rgba(0,32,194,.32)!important;color:#fff!important}#cookie-banner #cookie-accept-all:hover,#cookie-banner #cookie-save-cfg:hover{background:#0018A8!important}#cookie-banner #cookie-reject{background:#fff!important;color:#0020C2!important;border:1.5px solid #0020C2!important;box-shadow:none!important}#cookie-banner #cookie-config{background:transparent!important;color:#0020C2!important;border:0!important;box-shadow:none!important}</style>\n<div id="cookie-banner" style="display:none;position:fixed;bottom:0;left:0;right:0;z-index:99999;padding:12px 12px calc(12px + env(safe-area-inset-bottom,0px));box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,Helvetica,Arial,sans-serif;-webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px);background:rgba(245,245,247,.42)">\n  <div style="max-width:560px;margin:0 auto;background:rgba(255,255,255,.92);-webkit-backdrop-filter:blur(24px);backdrop-filter:blur(24px);border-radius:20px;box-shadow:0 8px 32px rgba(0,32,194,.22);padding:18px 16px 16px;border:1px solid rgba(255,255,255,.65);box-sizing:border-box">\n    <h2 style="margin:0 0 8px;font-size:clamp(16px,4.2vw,19px);color:#1d1d1f;font-weight:800;letter-spacing:-.02em;line-height:1.25">Usamos cookies para mejorar tu experiencia</h2>\n    <p style="margin:0 0 14px;font-size:13px;line-height:1.5;color:#334155;word-wrap:break-word;overflow-wrap:anywhere">\n      Usamos cookies propias y técnicas para acceso seguro, sesión, estadísticas básicas y el funcionamiento del sitio.\n      <b>No usamos cookies de publicidad de terceros.</b>\n      Al continuar o aceptar, autorizas esta utilización.\n      Más info:\n      <a href="__PROCSIS__/cookies" style="color:#0020C2;font-weight:700;text-decoration:underline">política de cookies</a>,\n      <a href="__PROCSIS__/tratamiento-datos" style="color:#0020C2;font-weight:700;text-decoration:underline">tratamiento de datos</a>\n      y\n      <a href="__PROCSIS__/reembolsos" style="color:#0020C2;font-weight:700;text-decoration:underline">política de reembolsos</a>.\n    </p>\n    <div id="cookie-config-panel" style="display:none;background:rgba(239,246,255,.9);border:1px solid #bfdbfe;border-radius:14px;padding:12px;margin-bottom:12px;font-size:13px;color:#1e3a5f">\n      <label style="display:flex;gap:8px;align-items:flex-start;margin:8px 0;line-height:1.35"><input type="checkbox" checked disabled style="width:18px;height:18px;flex-shrink:0;margin-top:2px"> Cookies esenciales (sesión / seguridad) — siempre activas</label>\n      <label style="display:flex;gap:8px;align-items:flex-start;margin:8px 0;line-height:1.35"><input type="checkbox" id="ck-pref" checked style="width:18px;height:18px;flex-shrink:0;margin-top:2px"> Preferencias de interfaz</label>\n      <label style="display:flex;gap:8px;align-items:flex-start;margin:8px 0;line-height:1.35"><input type="checkbox" id="ck-stat" style="width:18px;height:18px;flex-shrink:0;margin-top:2px"> Estadística anónima de uso</label>\n      <button type="button" id="cookie-save-cfg" style="margin-top:8px;width:100%;background:#0020C2;color:#fff;border:0;border-radius:12px;padding:11px 14px;font-weight:700;cursor:pointer;font-size:14px">Guardar preferencias</button>\n    </div>\n    <div style="display:flex;flex-direction:column;gap:8px">\n      <button type="button" id="cookie-accept-all" style="width:100%;background:#0020C2;color:#fff;border:0;border-radius:14px;padding:13px 16px;font-weight:800;cursor:pointer;font-size:15px;box-shadow:0 4px 14px rgba(11,99,206,.35)">Aceptar todas las cookies</button>\n      <button type="button" id="cookie-reject" style="width:100%;background:#fff;color:#0020C2;border:1.5px solid #93c5fd;border-radius:14px;padding:12px 16px;font-weight:700;cursor:pointer;font-size:14px">Rechazar cookies no esenciales</button>\n      <button type="button" id="cookie-config" style="width:100%;background:transparent;color:#0020C2;border:0;border-radius:14px;padding:10px 16px;font-weight:700;cursor:pointer;font-size:14px">Configurar cookies</button>\n    </div>\n  </div>\n</div>\n<script>\n(function(){\n  try {\n    var KEY = \'tiendatrack_cookies_pref\';\n    if (!localStorage.getItem(KEY)) {\n      var b = document.getElementById(\'cookie-banner\');\n      if (b) b.style.display = \'block\';\n    }\n    function save(pref) {\n      localStorage.setItem(KEY, JSON.stringify(pref));\n      localStorage.setItem(\'tiendatrack_cookies_ok\', \'1\');\n      var b = document.getElementById(\'cookie-banner\');\n      if (b) b.style.display = \'none\';\n    }\n    var a = document.getElementById(\'cookie-accept-all\');\n    if (a) a.onclick = function(){ save({essential:true, pref:true, stat:true, all:true}); };\n    var r = document.getElementById(\'cookie-reject\');\n    if (r) r.onclick = function(){ save({essential:true, pref:false, stat:false, all:false}); };\n    var c = document.getElementById(\'cookie-config\');\n    if (c) c.onclick = function(){\n      var p = document.getElementById(\'cookie-config-panel\');\n      if (p) p.style.display = p.style.display === \'none\' ? \'block\' : \'none\';\n    };\n    var s = document.getElementById(\'cookie-save-cfg\');\n    if (s) s.onclick = function(){\n      var pref = document.getElementById(\'ck-pref\');\n      var st = document.getElementById(\'ck-stat\');\n      save({essential:true, pref: !!(pref && pref.checked), stat: !!(st && st.checked), all:false});\n    };\n  } catch(e) {}\n})();\n</script>\n<style>@media print{#cookie-banner{display:none!important}}</style>\n'
+COOKIES_HTML = '\n<style>#cookie-banner #cookie-accept-all,#cookie-banner #cookie-save-cfg{background:#0020C2!important;border:0!important;box-shadow:0 4px 14px rgba(0,32,194,.32)!important;color:#fff!important}#cookie-banner #cookie-accept-all:hover,#cookie-banner #cookie-save-cfg:hover{background:#0018A8!important}#cookie-banner #cookie-reject{background:#fff!important;color:#0020C2!important;border:1.5px solid #0020C2!important;box-shadow:none!important}#cookie-banner #cookie-config{background:transparent!important;color:#0020C2!important;border:0!important;box-shadow:none!important}</style>\n<div id="cookie-banner" style="display:none;position:fixed;bottom:0;left:0;right:0;z-index:99999;padding:12px 12px calc(12px + env(safe-area-inset-bottom,0px));box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,Helvetica,Arial,sans-serif;-webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px);background:rgba(245,245,247,.42)">\n  <div style="max-width:560px;margin:0 auto;background:rgba(255,255,255,.92);-webkit-backdrop-filter:blur(24px);backdrop-filter:blur(24px);border-radius:20px;box-shadow:0 8px 32px rgba(0,32,194,.22);padding:18px 16px 16px;border:1px solid rgba(255,255,255,.65);box-sizing:border-box">\n    <h2 style="margin:0 0 8px;font-size:clamp(16px,4.2vw,19px);color:#1d1d1f;font-weight:800;letter-spacing:-.02em;line-height:1.25">Usamos cookies para mejorar tu experiencia</h2>\n    <p style="margin:0 0 14px;font-size:13px;line-height:1.5;color:#334155;word-wrap:break-word;overflow-wrap:anywhere">\n      Usamos cookies propias y técnicas para acceso seguro, sesión, estadísticas básicas y el funcionamiento del sitio.\n      <b>No usamos cookies de publicidad de terceros.</b>\n      Al continuar o aceptar, autorizas esta utilización.\n      Más info:\n      <a href="/p/cookies" style="color:#0020C2;font-weight:700;text-decoration:underline">política de cookies</a>,\n      <a href="/p/tratamiento-datos" style="color:#0020C2;font-weight:700;text-decoration:underline">tratamiento de datos</a>\n      y\n      <a href="/p/reembolsos" style="color:#0020C2;font-weight:700;text-decoration:underline">política de reembolsos</a>.\n    </p>\n    <div id="cookie-config-panel" style="display:none;background:rgba(239,246,255,.9);border:1px solid #bfdbfe;border-radius:14px;padding:12px;margin-bottom:12px;font-size:13px;color:#1e3a5f">\n      <label style="display:flex;gap:8px;align-items:flex-start;margin:8px 0;line-height:1.35"><input type="checkbox" checked disabled style="width:18px;height:18px;flex-shrink:0;margin-top:2px"> Cookies esenciales (sesión / seguridad) — siempre activas</label>\n      <label style="display:flex;gap:8px;align-items:flex-start;margin:8px 0;line-height:1.35"><input type="checkbox" id="ck-pref" checked style="width:18px;height:18px;flex-shrink:0;margin-top:2px"> Preferencias de interfaz</label>\n      <label style="display:flex;gap:8px;align-items:flex-start;margin:8px 0;line-height:1.35"><input type="checkbox" id="ck-stat" style="width:18px;height:18px;flex-shrink:0;margin-top:2px"> Estadística anónima de uso</label>\n      <button type="button" id="cookie-save-cfg" style="margin-top:8px;width:100%;background:#0020C2;color:#fff;border:0;border-radius:12px;padding:11px 14px;font-weight:700;cursor:pointer;font-size:14px">Guardar preferencias</button>\n    </div>\n    <div style="display:flex;flex-direction:column;gap:8px">\n      <button type="button" id="cookie-accept-all" style="width:100%;background:#0020C2;color:#fff;border:0;border-radius:14px;padding:13px 16px;font-weight:800;cursor:pointer;font-size:15px;box-shadow:0 4px 14px rgba(11,99,206,.35)">Aceptar todas las cookies</button>\n      <button type="button" id="cookie-reject" style="width:100%;background:#fff;color:#0020C2;border:1.5px solid #93c5fd;border-radius:14px;padding:12px 16px;font-weight:700;cursor:pointer;font-size:14px">Rechazar cookies no esenciales</button>\n      <button type="button" id="cookie-config" style="width:100%;background:transparent;color:#0020C2;border:0;border-radius:14px;padding:10px 16px;font-weight:700;cursor:pointer;font-size:14px">Configurar cookies</button>\n    </div>\n  </div>\n</div>\n<script>\n(function(){\n  try {\n    var KEY = \'tiendatrack_cookies_pref\';\n    if (!localStorage.getItem(KEY)) {\n      var b = document.getElementById(\'cookie-banner\');\n      if (b) b.style.display = \'block\';\n    }\n    function save(pref) {\n      localStorage.setItem(KEY, JSON.stringify(pref));\n      localStorage.setItem(\'tiendatrack_cookies_ok\', \'1\');\n      var b = document.getElementById(\'cookie-banner\');\n      if (b) b.style.display = \'none\';\n    }\n    var a = document.getElementById(\'cookie-accept-all\');\n    if (a) a.onclick = function(){ save({essential:true, pref:true, stat:true, all:true}); };\n    var r = document.getElementById(\'cookie-reject\');\n    if (r) r.onclick = function(){ save({essential:true, pref:false, stat:false, all:false}); };\n    var c = document.getElementById(\'cookie-config\');\n    if (c) c.onclick = function(){\n      var p = document.getElementById(\'cookie-config-panel\');\n      if (p) p.style.display = p.style.display === \'none\' ? \'block\' : \'none\';\n    };\n    var s = document.getElementById(\'cookie-save-cfg\');\n    if (s) s.onclick = function(){\n      var pref = document.getElementById(\'ck-pref\');\n      var st = document.getElementById(\'ck-stat\');\n      save({essential:true, pref: !!(pref && pref.checked), stat: !!(st && st.checked), all:false});\n    };\n  } catch(e) {}\n})();\n</script>\n<style>@media print{#cookie-banner{display:none!important}}</style>\n'
 
 
 def _pqr_catalogo(espera=8):
@@ -1451,6 +1462,84 @@ def _inyectar_cookies(r):
     except Exception:
         pass
     return r
+
+
+# [tt-arreglos] ───────────────────────── páginas dentro de TiendaTrack, planes, 404 amable y estado de la conexión ─────────────────────────
+_RESEND_ULTIMO = {"error": ""}
+
+
+def _reescribir_enlaces(html):
+    # los enlaces internos del texto copiado de PROCSIS se quedan dentro de TiendaTrack
+    def cambio(m):
+        return m.group(1) + _marco_url(m.group(2)) + m.group(3)
+    html = re.sub(r"<script\b.*?</script>", "", html or "", flags=re.I | re.S)
+    return re.sub(r'(href=["\'])(/[^"\']*)(["\'])', cambio, html, flags=re.I)
+
+
+@app.route("/p/<path:ruta>")
+def pagina_procsis(ruta):
+    cod, r = _procsis_api("GET", "/pagina", params={"ruta": "/" + ruta}, espera=5)
+    if cod == 200 and r.get("ok"):
+        return render_template("pagina.html", titulo=str(r.get("titulo") or "")[:160], html=_reescribir_enlaces(str(r.get("html") or "")))
+    abort(404)
+
+
+@app.route("/planes")
+def planes():
+    return render_template("planes.html")
+
+
+@app.errorhandler(404)
+def error_404(e):
+    det = str(getattr(e, "description", "") or "")
+    return render_template("error404.html", detalle="" if det.startswith("The requested URL") else det), 404
+
+
+@app.route("/estado-procsis")
+def estado_procsis():
+    host = urllib.parse.urlparse(PROCSIS_URL).netloc if PROCSIS_URL else ""
+    pruebas = [("Menú y pie de página", "/marco", None), ("Planes y «Quién es PROCSIS»", "/info", None), ("Sedes y puntos de atención", "/puntos", None),
+               ("Páginas institucionales y legales", "/pagina", {"ruta": "/legal"}), ("Catálogo de PQR", "/pqr/catalogo", None)]
+    mensajes = {200: "Conectado", 401: "PROCSIS rechazó la llave: TIENDATRACK_API_KEY no coincide en los dos proyectos",
+                403: "PROCSIS rechazó la llave", 404: "PROCSIS no tiene esta ruta: falta aplicar el parche en PROCSIS y publicarlo",
+                429: "Demasiadas consultas, espera un minuto", 0: "PROCSIS no respondió (revisa PROCSIS_URL)"}
+    filas = []
+    for nombre, ruta, par in pruebas:
+        cod, r = _procsis_api("GET", ruta, params=par, espera=5)
+        extra = ""
+        if cod == 200 and ruta == "/info":
+            extra = "%d plan(es) activos · demo %s" % (len(r.get("planes") or []), "abierta" if (r.get("demo") or {}).get("registro_abierto") else "cerrada")
+        elif cod == 200 and ruta == "/puntos":
+            extra = "%d punto(s) publicado(s)" % len(r.get("puntos") or [])
+        elif cod == 200 and ruta == "/marco":
+            extra = "%d opciones de menú" % len((r.get("marco") or {}).get("menu") or [])
+        filas.append((nombre, cod, mensajes.get(cod, "Respuesta inesperada de PROCSIS"), extra))
+    correo = {"llave": bool((os.environ.get("RESEND_API_KEY") or "").strip()),
+              "de": (os.environ.get("RESEND_FROM") or "").strip() or "(no definido: se usa onboarding@resend.dev)",
+              "error": _RESEND_ULTIMO.get("error") or "ninguno desde que arrancó este servidor"}
+    return render_template_string(ESTADO_HTML, host=host, llave=bool(API_KEY), filas=filas, correo=correo, demo=bool(os.environ.get("TT_DEMO_EMAIL") and os.environ.get("TT_DEMO_CLAVE")))
+
+
+ESTADO_HTML = (
+    '<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Estado de la conexión</title>'
+    '<style>body{margin:0;background:#f5f8ff;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#0b1437}.w{max-width:820px;margin:32px auto;padding:0 16px}'
+    '.c{background:#fff;border-radius:20px;box-shadow:0 12px 40px rgba(10,42,143,.12);padding:22px 24px;margin:0 0 16px}h1{color:#0a2a8f;margin:0 0 14px;font-size:26px}h2{margin:0 0 10px;font-size:17px;color:#0a2a8f}'
+    '.f{display:flex;gap:10px;align-items:center;padding:9px 0;border-top:1px solid #e8eefc;flex-wrap:wrap}.f:first-of-type{border-top:0}.n{flex:1;min-width:180px;font-weight:600}'
+    '.b{padding:3px 11px;border-radius:99px;font-size:12px;font-weight:700}.ok{background:#dcfce7;color:#166534}.mal{background:#fee2e2;color:#991b1b}.s{color:#4b5b86;font-size:13px}</style></head><body><div class="w">'
+    '<h1>Estado de la conexión con PROCSIS</h1>'
+    '<div class="c"><h2>Configuración de este servidor</h2><div class="f"><span class="n">PROCSIS_URL</span><span class="s">{{ host or "NO DEFINIDA" }}</span></div>'
+    '<div class="f"><span class="n">TIENDATRACK_API_KEY</span><span class="b {{ "ok" if llave else "mal" }}">{{ "definida" if llave else "falta" }}</span></div></div>'
+    '<div class="c"><h2>Conexiones</h2>{% for n, cod, msg, extra in filas %}<div class="f"><span class="n">{{ n }}</span>'
+    '<span class="b {{ "ok" if cod == 200 else "mal" }}">{{ cod or "sin respuesta" }}</span><span class="s">{{ msg }}{% if extra %} · {{ extra }}{% endif %}</span></div>{% endfor %}</div>'
+    '<div class="c"><h2>Correos de registro (Resend)</h2>'
+    '<div class="f"><span class="n">RESEND_API_KEY en este proyecto</span><span class="b {{ "ok" if correo.llave else "mal" }}">{{ "definida" if correo.llave else "falta" }}</span></div>'
+    '<div class="f"><span class="n">Remitente (RESEND_FROM)</span><span class="s">{{ correo.de }}</span></div>'
+    '<div class="f"><span class="n">Último error de Resend</span><span class="s">{{ correo.error }}</span></div>'
+    '<p class="s">Los PIN los envía TiendaTrack, no PROCSIS: RESEND_API_KEY y RESEND_FROM deben estar también en las variables de entorno del proyecto de TiendaTrack en Vercel. '
+    'El remitente onboarding@resend.dev solo entrega a la cuenta dueña de Resend; usa un remitente de un dominio verificado.</p></div>'
+    '<div class="c"><h2>Ingreso de demostración</h2><div class="f"><span class="n">TT_DEMO_EMAIL y TT_DEMO_CLAVE</span><span class="b {{ "ok" if demo else "mal" }}">{{ "activo" if demo else "no definido" }}</span></div></div>'
+    '<p class="s">Esta pantalla no muestra claves. Cuando todo esté en verde puedes quitarla.</p></div></body></html>'
+)
 
 
 app.add_template_filter(_cop, "cop")
@@ -1750,7 +1839,6 @@ select.campo{appearance:none;-webkit-appearance:none;background-image:linear-gra
     <p class="ven-sub">{{ info.quienes.titulo }}</p>
     <p class="txt">{{ info.quienes.texto }}</p>
     {% if info.quienes.puntos %}<ul class="pts">{% for p in info.quienes.puntos %}<li>{{ p }}</li>{% endfor %}</ul>{% endif %}
-    {% if info.quienes.web != '#' %}<a class="cta" href="{{ info.quienes.web }}" target="_blank" rel="noopener">Conocer más de PROCSIS</a>{% endif %}
     {% if info.quienes.correo %}<a class="cta sec" href="mailto:{{ info.quienes.correo }}">{{ info.quienes.correo }}</a>{% endif %}
     {% if info.quienes.telefono %}<a class="cta sec" href="tel:{{ info.quienes.telefono }}">{{ info.quienes.telefono }}</a>{% endif %}
   </div>
@@ -1770,12 +1858,12 @@ select.campo{appearance:none;-webkit-appearance:none;background-image:linear-gra
         <div class="pl-price">{% if p.mensual %}{{ p.mensual | cop }} <small>/ mes</small>{% else %}Consultar precio{% endif %}</div>
         {% if p.anual %}<div class="pl-line">o {{ p.anual | cop }} al año</div>{% endif %}
         <ul><li>Hasta {{ p.sucursales }} sucursal(es)</li><li>Hasta {{ p.usuarios }} usuario(s)</li><li>Hasta {{ p.productos | cop_n }} productos</li><li>Facturación DIAN: {{ p.dian }}</li></ul>
-        {% if info.demo.abierto and info.demo.url != '#' %}<a class="pl-cta" href="{{ info.demo.url }}" target="_blank" rel="noopener">Probar {{ info.demo.dias }} días gratis</a>{% else %}<div class="pl-view">Solo consulta · Sin activación en línea</div>{% endif %}
+        {% if info.demo.abierto %}<a class="pl-cta" href="/registro">Probar {{ info.demo.dias }} días gratis</a>{% else %}<div class="pl-view">Solo consulta · Sin activación en línea</div>{% endif %}
       </article>
       {% endfor %}
     </div>
     {% else %}<p class="txt">Los planes se muestran aquí en cuanto PROCSIS los publique.</p>{% endif %}
-    {% if info.demo.url != '#' %}{% if info.demo.abierto %}<a class="cta" href="{{ info.demo.url }}" target="_blank" rel="noopener">Probar {{ info.demo.dias }} días gratis</a>{% else %}<span class="cta off">Demo próximamente</span><a class="cta sec" href="{{ info.demo.url }}" target="_blank" rel="noopener">Ver en PROCSIS</a>{% endif %}{% endif %}
+    {% if info.demo.abierto %}<a class="cta" href="/registro">Probar {{ info.demo.dias }} días gratis</a>{% else %}<span class="cta off">Demo próximamente</span>{% endif %}
     <small class="nota">Precios en pesos colombianos. Pagos seguros con Wompi.</small>
   </div>
 </dialog>
@@ -1856,7 +1944,6 @@ textarea.pq-in{min-height:140px;resize:vertical}
   <a class="btn-consultar-light" href="{{ url_for('pqr_consulta') }}">Consultar PQR</a>
 </div>
 <p class="mini">Tiempo estimado de respuesta: aproximadamente {{ dias }} días hábiles.</p>
-<p class="mini"><a href="{{ procsis }}/pqr-info" target="_blank" rel="noopener">Información de interés: cómo radicar una PQR</a></p>
 {% endblock %}
 ''',
     'pqr_crear.html': r'''{% extends "pqr_base.html" %}
@@ -1930,10 +2017,78 @@ textarea.pq-in{min-height:140px;resize:vertical}
 ''',
     'puntos.html': r'''<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="strict-origin-when-cross-origin">
 <title>Sedes y puntos de atención · TiendaTrack</title>
 <style>html,body{margin:0;background:#fff;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",Roboto,Helvetica,Arial,sans-serif}</style></head><body>
 {% include 'marco_menu.html' %}
 {{ pagina | safe }}
+{% include 'marco_pie.html' %}
+{% include 'marco_ventanas.html' %}
+</body></html>
+''',
+    'pagina.html': r'''<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{ titulo }} · TiendaTrack</title>
+<style>html,body{margin:0;background:linear-gradient(180deg,#f5f8ff,#eaf1ff);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#1d1d1f}
+.pg{max-width:880px;margin:36px auto 56px;padding:0 16px}
+.pg-card{background:#fff;border-radius:24px;box-shadow:0 20px 60px rgba(10,42,143,.12);padding:clamp(22px,4vw,44px);line-height:1.7;font-size:16px}
+.pg-card h1{margin:0 0 18px;color:#0a2a8f;font-size:clamp(26px,4vw,36px);letter-spacing:-.02em;line-height:1.15}
+.pg-card h2,.pg-card h3{color:#0a2a8f;margin:26px 0 8px}.pg-card a{color:#0a6fb5}.pg-card img{max-width:100%;height:auto}.pg-card table{max-width:100%;display:block;overflow-x:auto}
+.pg-volver{display:inline-block;margin:0 0 14px;color:#0a2a8f;font-weight:600;text-decoration:none;font-size:14px}</style></head><body>
+{% include 'marco_menu.html' %}
+<div class="pg"><a class="pg-volver" href="/">← Volver al inicio</a><article class="pg-card"><h1>{{ titulo }}</h1>{{ html | safe }}</article></div>
+{% include 'marco_pie.html' %}
+{% include 'marco_ventanas.html' %}
+</body></html>
+''',
+    'planes.html': r'''<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Planes y demo gratis · TiendaTrack</title>
+<style>html,body{margin:0;background:linear-gradient(180deg,#f5f8ff,#eaf1ff);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",Roboto,Helvetica,Arial,sans-serif}</style></head><body>
+{% include 'marco_menu.html' %}
+<div class="ven" style="margin:36px auto 56px;position:relative;display:block;width:min(94vw,1000px)"><div class="ven-in" style="max-height:none">
+  <h2>Planes y demo gratis</h2>
+  <p class="ven-sub">Empieza con una demo de {{ info.demo.dias }} días y paga solo si te sirve.</p>
+  {% if info.planes %}
+    <div class="lv-plans">
+      {% for p in info.planes %}
+      <article class="pl-card">
+        <div class="pl-badge">{{ 'PRUEBA' if not p.mensual else 'PLAN' }}</div>
+        <h3>{{ p.nombre }}</h3>
+        <div class="pl-line">TiendaTrack{% if p.descripcion %} · {{ p.descripcion }}{% endif %}</div>
+        <div class="pl-price">{% if p.mensual %}{{ p.mensual | cop }} <small>/ mes</small>{% else %}Consultar precio{% endif %}</div>
+        {% if p.anual %}<div class="pl-line">o {{ p.anual | cop }} al año</div>{% endif %}
+        <ul><li>Hasta {{ p.sucursales }} sucursal(es)</li><li>Hasta {{ p.usuarios }} usuario(s)</li><li>Hasta {{ p.productos | cop_n }} productos</li><li>Facturación DIAN: {{ p.dian }}</li></ul>
+        {% if info.demo.abierto %}<a class="pl-cta" href="/registro">Probar {{ info.demo.dias }} días gratis</a>{% else %}<div class="pl-view">Solo consulta · Sin activación en línea</div>{% endif %}
+      </article>
+      {% endfor %}
+    </div>
+  {% else %}<p class="txt">Los planes se muestran aquí en cuanto PROCSIS los publique.</p>{% endif %}
+  {% if info.demo.abierto %}<a class="cta" href="/registro">Probar {{ info.demo.dias }} días gratis</a>{% else %}<span class="cta off">Demo próximamente</span>{% endif %}
+  <small class="nota">Precios en pesos colombianos. Pagos seguros con Wompi.</small>
+</div></div>
+{% include 'marco_pie.html' %}
+{% include 'marco_ventanas.html' %}
+</body></html>
+''',
+    'error404.html': r'''<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>404 · TiendaTrack</title>
+<style>html,body{margin:0;background:linear-gradient(135deg,#eaf1ff,#f5fbff 55%,#e9fff3);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#0b1437}
+.e4{min-height:62vh;display:flex;align-items:center;justify-content:center;padding:36px 16px}
+.e4-card{max-width:520px;width:100%;text-align:center;background:rgba(255,255,255,.85);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,.8);border-radius:28px;box-shadow:0 24px 70px rgba(10,42,143,.18);padding:40px 28px}
+.e4-num{font-size:68px;font-weight:800;letter-spacing:-.04em;background:linear-gradient(135deg,#1fdc6a,#12b5ff 55%,#0a2a8f);-webkit-background-clip:text;background-clip:text;color:transparent;line-height:1}
+.e4-card h1{margin:10px 0 10px;font-size:clamp(22px,4vw,28px);color:#0a2a8f;letter-spacing:-.02em}
+.e4-card p{margin:0 0 20px;color:#4b5b86;line-height:1.6;font-size:15.5px}
+.e4-b{display:inline-block;margin:4px 6px;padding:12px 22px;border-radius:999px;background:linear-gradient(135deg,#0a2a8f,#1747d6 55%,#12b5ff);color:#fff;text-decoration:none;font-weight:700;font-size:15px}
+.e4-b.sec{background:#eef3ff;color:#0a2a8f}</style></head><body>
+{% include 'marco_menu.html' %}
+<div class="e4"><div class="e4-card" role="alert">
+  <div class="e4-num">404</div>
+  <h1>No eres tú, somos nosotros</h1>
+  <p>Esta página no está disponible en este momento. Estamos trabajando para restablecer el servicio muy pronto; no te preocupes, tu información está segura.{% if detalle %}<br><small>{{ detalle }}</small>{% endif %}</p>
+  <a class="e4-b" href="/">Volver al inicio</a><a class="e4-b sec" href="/pqr">Reportar un problema</a>
+</div></div>
 {% include 'marco_pie.html' %}
 {% include 'marco_ventanas.html' %}
 </body></html>
@@ -2077,7 +2232,7 @@ if(b&&i)b.addEventListener('click',function(){var m=i.type==='password';i.type=m
     <label for="repite">Repite la clave</label>
     <input class="campo" id="repite" name="repite" type="password" autocomplete="new-password" required>
     <label class="chk"><input type="checkbox" name="acepto" value="1" {{ 'checked' if f.acepto }}>
-      <span>Acepto los <a href="{{ procsis }}/legal" target="_blank" rel="noopener">términos</a> y la <a href="{{ procsis }}/tratamiento-datos" target="_blank" rel="noopener">política de tratamiento de datos personales</a> de PROCSIS.</span></label>
+      <span>Acepto los <a href="/p/legal" target="_blank" rel="noopener">términos</a> y la <a href="/p/tratamiento-datos" target="_blank" rel="noopener">política de tratamiento de datos personales</a> de PROCSIS.</span></label>
     <button class="btn verde" type="submit">Empezar mi demo de {{ dias_demo }} días</button>
   </form>
 {% endif %}
