@@ -1215,36 +1215,60 @@ def _procsis_api(metodo, ruta, datos=None, params=None, espera=8):
             return e.code, json.loads(e.read().decode("utf-8") or "{}")
         except Exception:
             return e.code, {"ok": False, "error": "PROCSIS respondió con un error."}
-    except Exception:
-        return 0, {"ok": False, "error": "PROCSIS no respondió. Intenta de nuevo en un minuto."}
+    except Exception as ex:
+        return 0, {"ok": False, "error": "PROCSIS no respondió. Intenta de nuevo en un minuto.", "detalle": (type(ex).__name__ + ": " + str(ex))[:160]}
+
+
+# [tt-respaldo] contenido de respaldo = el de EduTrack, mientras PROCSIS no responda
+_PIE_EDUTRACK = [
+    ("marca", "Soporte por correo", "/contacto"), ("marca", "Línea de atención", "/contacto"), ("marca", "Formulario de contacto", "/contacto"),
+    ("Procsis y la Educación", "Procsis y el sector educativo", "/institucional/educacion"),
+    ("Procsis y la Educación", "EduTrack para directivos y rectores", "/institucional/directivos"),
+    ("Procsis y la Educación", "Gestión para la coordinación escolar", "/institucional/coordinacion"),
+    ("Procsis y la Educación", "Plataforma para docentes", "/institucional/docentes"),
+    ("Procsis y la Educación", "Portal de seguimiento para padres", "/institucional/familias"),
+    ("Procsis y la Educación", "Socios y alianzas", "/institucional/alianzas"),
+    ("Infraestructura y Operación", "Operador de infraestructura", "/institucional/infraestructura"),
+    ("Infraestructura y Operación", "Trust Center", "/institucional/trust-center"),
+    ("Infraestructura y Operación", "Política de privacidad", "/privacidad"),
+    ("Infraestructura y Operación", "Integridad y conformidad", "/institucional/integridad"),
+    ("Infraestructura y Operación", "Sustentabilidad", "/institucional/sustentabilidad"),
+    ("Corporativo e Institucional", "Equipo Directivo", "/institucional/equipo"),
+    ("Corporativo e Institucional", "Prensa y Medios", "/institucional/prensa"),
+    ("Corporativo e Institucional", "Eventos y capacitaciones docentes", "/eventos-virtuales"),
+    ("Corporativo e Institucional", "Canal oficial de PQRSD", "/pqr"),
+    ("Procsis Ventas y Legal", "Condiciones de venta", "/institucional/condiciones-venta"),
+    ("Procsis Ventas y Legal", "Política de entrega", "/institucional/politica-entrega"),
+    ("Procsis Ventas y Legal", "Política de devoluciones", "/reembolsos"),
+    ("Procsis Ventas y Legal", "Preguntas frecuentes", "/institucional/faq"),
+    ("Procsis Ventas y Legal", "Superintendencia de Industria y Comercio", "https://www.sic.gov.co"),
+]
 
 
 def _marco_respaldo():
+    def enl(sec):
+        return [{"titulo": t, "url": u} for s, t, u in _PIE_EDUTRACK if s == sec]
     return {
         "menu": [
             {"titulo": "Procsis", "etiqueta": "Explorar Procsis", "sub": [
-                {"titulo": "¿Qué es Procsis?", "accion": "quienes"},
-                {"titulo": "Infraestructura en la Nube", "url": "/procsis"},
-                {"titulo": "Sello de Auditoría Digital", "url": "/procsis"},
-                {"titulo": "Seguridad Jurídica y Ciberseguridad", "url": "/procsis"}]},
-            {"titulo": "Soluciones", "url": "/procsis"},
+                {"titulo": "¿Qué es Procsis?", "accion": "quienes"}, {"titulo": "Infraestructura en la Nube", "url": "/tecnologia"},
+                {"titulo": "Sello de Auditoría Digital", "url": "/procsis"}, {"titulo": "Seguridad Jurídica y Ciberseguridad", "url": "/politicas/ciberseguridad"}]},
+            {"titulo": "Soluciones", "grupos": [
+                {"etiqueta": "Gestión Escolar", "sub": [{"titulo": "Módulo de Notas SIEE", "url": "/soluciones#notas"}, {"titulo": "Boletines Académicos", "url": "/soluciones#notas"},
+                                                       {"titulo": "Pre-Matrícula SIMAT", "url": "/soluciones#admisiones"}, {"titulo": "Formularios de Matrícula", "url": "/soluciones#admisiones"}]},
+                {"etiqueta": "Seguridad Perimetral", "sub": [{"titulo": "Control de Portería QR", "url": "/soluciones#asistencia"}, {"titulo": "Alertas Rojas (7:00 AM)", "url": "/soluciones#asistencia"},
+                                                            {"titulo": "Módulo de Salida Segura", "url": "/soluciones"}, {"titulo": "Despacho de Rutas Escolares", "url": "/soluciones"}]}]},
             {"titulo": "Planes", "accion": "planes"},
-            {"titulo": "Ayuda", "etiqueta": "Ayuda y soporte", "sub": [{"titulo": "Radicar una PQR", "url": "/pqr"}, {"titulo": "Soporte", "url": "/contacto"}]},
+            {"titulo": "Ayuda", "etiqueta": "Ayuda y soporte", "sub": [
+                {"titulo": "Tutoriales para Profesores", "url": "/ayuda"}, {"titulo": "Portal de Consulta para Padres", "url": "/login"},
+                {"titulo": "Radicar PQR", "url": "/pqr"}, {"titulo": "Soporte por WhatsApp", "url": "/whatsapp"}]},
             {"titulo": "Sedes y Puntos de Atención", "url": "/puntos-atencion"},
             {"titulo": "Support", "url": "/support"},
         ],
-        "marca": {"titulo": "PROCSIS", "texto": "Soluciones digitales para tu negocio. Un producto de PROCSIS.",
-                  "enlaces": [{"titulo": "Soporte por correo", "url": "/contacto"}, {"titulo": "Línea de atención", "url": "/contacto"},
-                              {"titulo": "Formulario de contacto", "url": "/contacto"}]},
-        "columnas": [
-            {"titulo": "Procsis y la Educación", "enlaces": [{"titulo": "Procsis y el sector educativo", "url": "/procsis"}, {"titulo": "Socios y alianzas", "url": "/procsis"}]},
-            {"titulo": "Infraestructura y Operación", "enlaces": [{"titulo": "Trust Center", "url": "/procsis"}, {"titulo": "Política de privacidad", "url": "/tratamiento-datos"}]},
-            {"titulo": "Corporativo e Institucional", "enlaces": [{"titulo": "Equipo Directivo", "url": "/procsis"}, {"titulo": "Canal oficial de PQRSD", "url": "/pqr"}]},
-            {"titulo": "Procsis Ventas y Legal", "enlaces": [{"titulo": "Condiciones de venta", "url": "/legal"}, {"titulo": "Política de devoluciones", "url": "/legal"},
-                                                          {"titulo": "Superintendencia de Industria y Comercio", "url": "https://www.sic.gov.co"}]},
-        ],
-        "legal": [{"titulo": "Términos", "url": "/legal"}, {"titulo": "Cookies", "url": "/legal"},
-                  {"titulo": "Habeas data", "url": "/tratamiento-datos"}, {"titulo": "Sedes y Puntos de Atención", "url": "/contacto"}],
+        "marca": {"titulo": "PROCSIS", "texto": "Soluciones digitales para el sector educativo. Plataforma académica multi-institucional.", "enlaces": enl("marca")},
+        "columnas": [{"titulo": t, "enlaces": enl(t)} for t in ("Procsis y la Educación", "Infraestructura y Operación", "Corporativo e Institucional", "Procsis Ventas y Legal")],
+        "legal": [{"titulo": "Términos", "url": "/legal"}, {"titulo": "Cookies", "url": "/cookies"},
+                  {"titulo": "Habeas data", "url": "/politicas/habeas"}, {"titulo": "Sedes y Puntos de Atención", "url": "/puntos-atencion"}],
         "notas": [],
         "tagline": "Un producto de PROCSIS · Innovación que gestiona",
         "aviso": "Entrega comprobantes de venta; no emite factura electrónica DIAN.",
@@ -1336,8 +1360,22 @@ def _cache_procsis(c, ruta, limpiar, espera):
     return c["datos"]
 
 
+def _refrescar_todo():
+    # si el menú o la información de PROCSIS están vencidos, se piden a la vez: la espera es una sola
+    import concurrent.futures
+    t = time.time()
+    pend = [(c, r, l) for c, r, l in ((_MARCO, "/marco", _marco_limpiar), (_INFO, "/info", _info_limpiar)) if c["datos"] is None or t - c["ts"] >= c["ttl"]]
+    if len(pend) > 1:
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+                list(ex.map(lambda a: _cache_procsis(a[0], a[1], a[2], 7), pend))
+        except Exception:
+            pass
+
+
 def _marco_procsis():
-    return _cache_procsis(_MARCO, "/marco", _marco_limpiar, 3)
+    _refrescar_todo()
+    return _cache_procsis(_MARCO, "/marco", _marco_limpiar, 7)
 
 
 def _info_limpiar(bruto):
@@ -1361,7 +1399,8 @@ def _info_limpiar(bruto):
 
 
 def _info_procsis():
-    return _cache_procsis(_INFO, "/info", _info_limpiar, 3)
+    _refrescar_todo()
+    return _cache_procsis(_INFO, "/info", _info_limpiar, 7)
 
 
 def _cop(v):
@@ -1513,6 +1552,8 @@ def estado_procsis():
             extra = "%d punto(s) publicado(s)" % len(r.get("puntos") or [])
         elif cod == 200 and ruta == "/marco":
             extra = "%d opciones de menú" % len((r.get("marco") or {}).get("menu") or [])
+        if cod != 200:
+            extra = str(r.get("detalle") or r.get("error") or "")[:160]
         filas.append((nombre, cod, mensajes.get(cod, "Respuesta inesperada de PROCSIS"), extra))
     correo = {"llave": bool((os.environ.get("RESEND_API_KEY") or "").strip()),
               "de": (os.environ.get("RESEND_FROM") or "").strip() or "(no definido: se usa onboarding@resend.dev)",
